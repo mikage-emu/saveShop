@@ -1,0 +1,290 @@
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<style>
+body {
+  background: burlywood;
+}
+.title_card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+
+  /* Adjust position of first item */
+  margin-top: -0.75em;
+}
+.title_card_contents {
+  width: 50%;
+  background: beige;
+  border: 2px solid brown;
+  border-radius: 5px;
+  margin: 0.25em;
+  padding: 0.5em;
+  transition: width 0.3s ease-out;
+}
+.title_card_contents:hover {
+  background: #f5f5bf;
+}
+</style>
+</head>
+<body>
+
+<div style="margin: auto; width: 50%; display: flex; justify-content: space-between; align-items: center">
+  <a id="content-prev" style="font-size: 2em" href="#">Previous 50</a>
+  <img id="directory-banner" />
+  <a id="content-next" style="font-size: 2em" href="#">Next 50</a>
+</div>
+<p id="root"></p>
+
+<script>
+  function withRequestedResource(url, fn) {
+    fetch(url).then(response => {
+      if (!response.ok) {
+        console.log(`Error while trying to load "${url}": ${response.status}`);
+        return;
+      }
+      response.text().then(text => fn(text));
+    });
+  }
+
+  function map_url(url) {
+    let name = url;
+    let filename = url.substring(url.lastIndexOf("/") + 1);
+    if (name.startsWith("https://kanzashi-movie-ctr.cdn.nintendo.net/m/")) {
+      // Video server: Replace "moflex" extension with "mp4"
+      filename = filename.substring(0, filename.lastIndexOf(".moflex")) + ".mp4";
+      return "kanzashi-movie/" + filename;
+    } else if (name.startsWith("https://kanzashi-ctr.cdn.nintendo.net/i/") ||
+               name.startsWith("https://kanzashi-wup.cdn.nintendo.net/i/")) {
+      // Image serer
+      return "kanzashi/" + filename;
+    } else {
+      console.log(`Unknown resource URL "${url}"`);
+      return "UNKNOWN";
+    }
+  };
+
+  let xhr = new XMLHttpRequest();
+  xhr.open('GET', 'samurai/contents');
+//  xhr.open('GET', 'samurai/directory/1095230'); // TODO: Parse from argument list
+  let xmlDoc;
+  let titles;
+  let content_type = "title"; // TODO: Parse from argument list
+  xhr.onreadystatechange = () => {
+    if (xhr.readyState !== XMLHttpRequest.DONE) {
+      return;
+    }
+    parser = new DOMParser();
+    xmlDoc = parser.parseFromString(xhr.responseText, "text/xml");
+    titles = xmlDoc.querySelectorAll(`contents > content > ${content_type}`);
+
+    window.onhashchange = reload;
+    reload();
+  };
+
+  function reload() {
+    let args = window.location.hash.substring(1).split("&");
+    if (args.length == 1 && args[0] == [""]) {
+      args = [];
+    }
+    args = new Map(args.map(arg => arg.split("=")));
+    let content_start = parseInt(args.get("content-start") ?? "0");
+    let content_length = parseInt(args.get("content-length") ?? "50");
+    {
+      let prev_button = document.getElementById("content-prev");
+      prev_button.style["pointer-events"] = (content_start == 0) ? "none" : "";
+      document.getElementById("content-prev").href = `#content-start=${Math.max(0, content_start - content_length)}`;
+
+      let next_button = document.getElementById("content-next");
+      next_button.style["pointer-events"] = (content_start + content_length >= titles.length) ? "none" : "";
+      next_button.href = `#content-start=${content_start + content_length}`;
+    }
+
+    {
+      let directoryBanner = xmlDoc.querySelector("directory > banner_url");
+      document.getElementById("directory-banner").src = directoryBanner ? map_url(directoryBanner.textContent) : "";
+    }
+
+    const containerNode = document.createElement("div");
+    containerNode.className = "title_card";
+
+    for (let title_index = content_start; title_index < Math.min(titles.length, content_start + content_length); ++title_index) {
+      const node = document.createElement("div");
+      node.className = "title_card_contents";
+      let title = titles[title_index];
+      const contentId = title.getAttribute("id");
+      {
+        let headerNode = document.createElement("div")
+        headerNode.style["display"] = "flex"
+        headerNode.style["align-items"] = "start"
+
+        let icon = title.getElementsByTagName("icon_url")[0];
+        if (!icon) {
+          // Some movies have a thumbnail_url instead
+          icon = title.getElementsByTagName("thumbnail_url")[0];
+        }
+        if (icon) {
+          headerNode.innerHTML = `<img src="` + map_url(icon.textContent) + `" />`;
+        }
+        console.log(title.getElementsByTagName("name")[0].textContent.replace("\n", "<br>") + ": " + contentId)
+        headerNode.innerHTML += `<span style="margin-left: 0.5em; font-size: 1.25em">` + title.getElementsByTagName("name")[0].textContent.replace("\n", "<br>").replace("<br><br>", "<br>") + `</span>`;
+
+        // Render stars
+        // TODO: Support fractional star display
+        const score = title.querySelector(`${content_type} > star_rating_info > score`)?.textContent
+        let starHtml = `<span class="num-stars-label" style="margin-left: auto; color: gray">${score ? "" : "(unrated)"}</span><span>`;
+        for (let i = 0; i < 5; ++i) {
+          starHtml += `<span style="color: orange">` + (i < (+score + 0.25) ? "★" : "☆") + `</span>`;
+        }
+        headerNode.innerHTML += starHtml + `</span>`;
+
+        node.appendChild(headerNode);
+      }
+
+      let ratingInfo = document.createElement("div");
+      ratingInfo.style["text-align"] = "right";
+      const ratingSystem = title.getElementsByTagName("rating_system")[0];
+      if (ratingSystem) {
+        const rating = title.getElementsByTagName("rating")[0];
+        ratingInfo.innerHTML = ratingSystem.getElementsByTagName("name")[0].textContent;
+        ratingInfo.innerHTML += `: ` + rating.getElementsByTagName("name")[0].textContent;
+      } else {
+        ratingInfo.innerHTML = "(no content rating)";
+      }
+      node.appendChild(ratingInfo);
+
+      node.onclick = () => {
+        // Unregister on-click handler
+        // TODO: Implement collapsing on re-click
+        node.onclick = () => {}
+
+        // TODO: Load detailed content page and extract description
+        let child = document.createElement("div");
+// TODO: Insert the banner at the top instead
+//        child.innerHTML = `<img src="` + map_url(title.getElementsByTagName("banner_url")[0].textContent) + `" />`;
+
+        let secondaryHeader = document.createElement("div");
+        secondaryHeader.style["display"] = "flex"
+        secondaryHeader.style["align-items"] = "center"
+
+        let thumbnail = document.createElement("img");
+        thumbnail.style["padding-right"] = "0.25em";
+        secondaryHeader.appendChild(thumbnail);
+
+        let ternaryHeader = document.createElement("div");
+        {
+          let priceText = document.createElement("p");
+          priceText.className = "price-label";
+          ternaryHeader.appendChild(priceText);
+        }
+
+        {
+          let platformText = document.createElement("p");
+          platformText.className = "platform-label";
+          ternaryHeader.appendChild(platformText);
+        }
+
+        {
+          let releaseText = document.createElement("p");
+          releaseText.className = "releasedate-label";
+          ternaryHeader.appendChild(releaseText);
+        }
+        secondaryHeader.appendChild(ternaryHeader);
+
+        {
+          let rating = document.createElement("img");
+          rating.className = "rating-img";
+          rating.style["margin-left"] = "auto";
+          secondaryHeader.appendChild(rating);
+        }
+
+        child.appendChild(secondaryHeader);
+
+        withRequestedResource(`samurai/${content_type}/${contentId}`, response => {
+            let xml = parser.parseFromString(response, "text/xml");
+
+            let thumbnail_urls = Array.from(xml.querySelectorAll(`${content_type} > thumbnails > thumbnail`),
+                                                                 tag => map_url(tag.getAttribute("url")));
+
+// TODO: Replace the header icon instead
+            if (thumbnail_urls.length > 0) {
+              thumbnail.src = thumbnail_urls[0];
+              let index = 0;
+              if (thumbnail_urls.length > 1) {
+                setInterval(function() {
+                    child.getElementsByTagName("img")[0].src = thumbnail_urls[index];
+                    index = (index + 1) % thumbnail_urls.length;
+                }, 1000);
+              }
+            }
+
+            if (xml.getElementsByTagName("description")[0]) {
+              child.innerHTML += `<p>` + xml.getElementsByTagName("description")[0].textContent + `</p>`;
+              child.innerHTML += `<hr>`;
+            }
+
+            // Match both in standalone video documents and embedded video documents
+            let videos = Array.from(xml.querySelectorAll(`movie > files > file > movie_url`),
+                url => {
+                    return `<video controls="controls" preload="auto" src="${map_url(url.textContent)}" style="margin-bottom: 240"></video>`;
+                }).join("");
+
+            let data = Array.from(xml.querySelectorAll(`${content_type} > screenshots > screenshot`),
+                node => {
+                    //upper = map_url(node.querySelector("image_url[type=upper]").textContent);
+                    //lower = map_url(node.querySelector("image_url[type=lower]").textContent);
+                    let upper = node.querySelector("image_url[type=upper]");
+                    let lower = node.querySelector("image_url[type=lower]");
+                    if (lower || upper) {
+                      return `<div><img src=${map_url(upper.textContent)} /><br><img src=${map_url(lower.textContent)} style="margin-left: 40"/></div>`
+                    } else {
+                      // Wii U uses a single image_url tag, but actually show the thumbnail_url here instead since the full screenshot is too large
+                      // TODO: Pop-up the full screenshot on click
+                      let image = map_url(node.querySelector("thumbnail_url").textContent);
+                      return `<div><img src=${image} style="margin-left: 40"/></div>`
+                    }
+                }).join("");
+            let mediaHTML = `<div style="overflow:scroll"><div style="display: flex; gap: 0.5em">`;
+            mediaHTML += videos;
+            mediaHTML += data + `</div></div>`;
+            child.innerHTML += mediaHTML;
+
+            let platformTag = xml.querySelector("platform > name");
+            if (platformTag) {
+              child.getElementsByClassName("platform-label")[0].textContent = platformTag.textContent;
+            }
+
+            let release_date_on_eshop = xml.getElementsByTagName("release_date_on_eshop")[0];
+            if (release_date_on_eshop) {
+              child.getElementsByClassName("releasedate-label")[0].textContent = "Release date: " + release_date_on_eshop.textContent;
+            }
+            child.getElementsByClassName("rating-img")[0].src = map_url(xml.querySelector(`${content_type} > rating_info > rating > icons > icon[type=small]`).getAttribute("url"));
+            let numScoreVotes = xml.querySelector(`${content_type} > star_rating_info > votes`)?.textContent;
+            if (numScoreVotes) {
+              node.getElementsByClassName("num-stars-label")[0].textContent =  "(" + numScoreVotes + ")";
+            }
+        });
+
+        if (content_type == "title") {
+          withRequestedResource(encodeURIComponent(`ninja/titles/online_prices%3Ftitle%5B%5D%3D${contentId}`), response => {
+            let xml = parser.parseFromString(response,"text/xml");
+            child.getElementsByClassName("price-label")[0].textContent = xml.getElementsByTagName("amount")[0].textContent;
+          });
+        }
+
+        node.style["width"] = "80%"
+
+        node.appendChild(child);
+      }
+
+      containerNode.appendChild(node);
+    }
+
+    document.getElementById("root").innerHTML = "";
+    document.getElementById("root").appendChild(containerNode);
+  }
+  xhr.send();
+</script>
+
+</body>
+</html> 
