@@ -531,6 +531,10 @@ struct Args {
     #[clap(long, action)]
     fetch_videos: bool,
 
+    /// Same as fetch-videos but needed to confirm unrestricted download of all videos
+    #[clap(long, action, hide=true)]
+    fetch_all_videos: bool,
+
     /// Path to ctr-common-1 certificate in PEM format (see Readme for details)
     #[clap(long, group = "cert-group")]
     cert: Option<String>,
@@ -627,6 +631,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         },
     };
+
+    args.fetch_videos |= args.fetch_all_videos;
+    if args.fetch_videos && !args.fetch_all_videos && args.title_id == None && args.movie_id == None && args.directory_id == None {
+        println!("Used --fetch-videos without constraint. This will download ALL videos from the eShop servers.");
+        println!("Use --title/--movie/--directory to restrict what contents to download videos for, or use --fetch-all-videos if you really need everything.");
+        std::process::exit(1);
+    }
 
     let mut client_builder = reqwest::Client::builder()
                             // Required to access eShop servers without a root CA
