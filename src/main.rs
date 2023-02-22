@@ -521,7 +521,6 @@ async fn fetch_resource(client: &reqwest::Client, resource_name: &str, url: &str
     Ok(())
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum EndPoint {
     Contents,
     Titles,
@@ -543,10 +542,6 @@ struct Args {
     /// eShop region to fetch from
     #[clap(long, possible_values=REGIONS)]
     region: String,
-
-    /// API endpoints to fetch (defaults to all)
-    #[clap(long, arg_enum)]
-    endpoints: Vec<EndPoint>,
 
     /// Only fetch data for the given title
     #[clap(long = "title")]
@@ -697,10 +692,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
 
-    if args.endpoints.is_empty() {
-        args.endpoints = vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms]
-    }
-    for endpoint in args.endpoints {
+    for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms] {
         println!("Fetching endpoint {}", endpoint);
         let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
         let mut file = File::create(format!("samurai/{}/{}/{}", locale.region, locale.language, endpoint)).unwrap();
