@@ -695,6 +695,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fs::create_dir_all(format!("samurai/{}", args.region)).unwrap();
     fs::create_dir_all(format!("kanzashi")).unwrap();
+    fs::create_dir_all(format!("kanzashi-movie")).unwrap();
 
     // Fetch list of languages first
     let languages: Vec<_> = {
