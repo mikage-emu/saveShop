@@ -692,147 +692,80 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
     return Ok(());
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    RESOURCE_CACHE.get_or_init(|| Mutex::new(HashSet::new()));
-
-    let mut args = Args::parse();
-
-    let ssl_id = match args.cert {
-        Some(cert) => {
-            let cert_bytes = fs::read(cert)?;
-            Some(reqwest::Identity::from_pem(&cert_bytes)?)
-        },
-        None => {
-            if !args.omit_ninja_contents {
-                println!("3DS client certificate required to download data from Ninja servers.");
-                println!("Specify its location with --cert, or use --omit-ninja-contents to skip this data.");
-                println!("See Readme for details.");
-                std::process::exit(1);
-            }
-            None
-        },
-    };
-
-    args.fetch_videos |= args.fetch_all_videos;
-    if args.fetch_videos && !args.fetch_all_videos && args.title_id == None && args.movie_id == None && args.directory_id == None {
-        println!("Used --fetch-videos without constraint. This will download ALL videos from the eShop servers.");
-        println!("Use --title/--movie/--directory to restrict what contents to download videos for, or use --fetch-all-videos if you really need everything.");
-        std::process::exit(1);
-    }
-
-    let mut client_builder = reqwest::Client::builder()
-                            // Required to access eShop servers without a root CA
-                            .danger_accept_invalid_certs(true)
-                            // Required for SSL cert to be used
-                            .use_rustls_tls();
-    if ssl_id.is_some() {
-        client_builder = client_builder.identity(ssl_id.unwrap());
-    }
-    let client = client_builder.build()?;
-
-    fs::create_dir_all(format!("samurai/{}", args.region)).unwrap();
-    fs::create_dir_all(format!("kanzashi")).unwrap();
-    fs::create_dir_all(format!("kanzashi-movie")).unwrap();
-
-    // Fetch list of languages first
-    let languages: Vec<_> = {
-        let data = get_with_retry(&client, format!("{}/{}?shop_id={}", samurai_baseurl(&args.region), EndPoint::Languages, shop_id)).await?;
-        let mut file = File::create(format!("samurai/{}/languages", args.region)).unwrap();
+async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms] {
+        println!("Fetching endpoint {}", endpoint);
+        let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
+        let mut file = File::create(format!("samurai/{}/{}/{}", locale.region, locale.language, endpoint)).unwrap();
         write!(file, "{}", data)?;
+    }
 
-        let parsed_xml: LanguagesDocument = quick_xml::de::from_str(&data).unwrap();
+    let (mut title_ids, mut movie_ids, directory_ids) = match (&args.title_id, &args.movie_id, &args.directory_id) {
+        (None, None, None) => {
+            let mut title_ids = Vec::new();
+            let mut movie_ids = Vec::new();
+            for content in fetch_content_list(&client, EndPoint::Contents, &locale).await? {
+                match content {
+                    (ContentType::Title, id) => title_ids.push(id),
+                    (ContentType::Movie, id) => movie_ids.push(id),
 
-        if parsed_xml.languages.language.is_empty() {
-            println!("Could not find any supported languages for region {}", &args.region);
-            std::process::exit(1);
-        }
-
-        println!("Supported languages for region {}:", &args.region);
-        for NodeLanguage { name, iso_code } in &parsed_xml.languages.language {
-            println!("  {} ({})", iso_code, name);
-        }
-
-        parsed_xml.languages.language.into_iter().map(|lang| lang.iso_code).collect()
+                    // "contents" endpoint only contains titles and movies
+                    (ContentType::Demo, _) => panic!("Unexpected demo title in contents list"),
+                }
+            }
+            let directory_ids = fetch_directory_list(&client, &locale).await?;
+            (title_ids, movie_ids, directory_ids)
+        },
+        _ => (args.title_id.clone().into_iter().collect::<Vec<_>>(),
+            args.movie_id.clone().into_iter().collect::<Vec<_>>(),
+            args.directory_id.clone().into_iter().collect::<Vec<_>>())
     };
 
-    for language in languages {
-        let locale = Locale { region: args.region.clone(), language: language.to_owned() };
-
-        fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
-
-        for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms] {
-            println!("Fetching endpoint {}", endpoint);
-            let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
-            let mut file = File::create(format!("samurai/{}/{}/{}", locale.region, locale.language, endpoint)).unwrap();
-            write!(file, "{}", data)?;
-        }
-
-        let (mut title_ids, mut movie_ids, directory_ids) = match (&args.title_id, &args.movie_id, &args.directory_id) {
-            (None, None, None) => {
-                let mut title_ids = Vec::new();
-                let mut movie_ids = Vec::new();
-                for content in fetch_content_list(&client, EndPoint::Contents, &locale).await? {
-                    match content {
-                        (ContentType::Title, id) => title_ids.push(id),
-                        (ContentType::Movie, id) => movie_ids.push(id),
-
-                        // "contents" endpoint only contains titles and movies
-                        (ContentType::Demo, _) => panic!("Unexpected demo title in contents list"),
-                    }
-                }
-                let directory_ids = fetch_directory_list(&client, &locale).await?;
-                (title_ids, movie_ids, directory_ids)
-            },
-            _ => (args.title_id.clone().into_iter().collect::<Vec<_>>(),
-                args.movie_id.clone().into_iter().collect::<Vec<_>>(),
-                args.directory_id.clone().into_iter().collect::<Vec<_>>())
-        };
-
-        for directory_id in directory_ids {
-            let directory: DirectoryDocument = handle_directory_content(&client, &directory_id, &locale).await?;
-            let directory = directory.directory;
-            assert!(directory.contents.is_some());
-            for content in directory.contents.unwrap().content {
-                match content.title_or_movie {
-                    NodeTitleOrMovie::Title(title) => if !title_ids.contains(&title.id) { title_ids.push(title.id) },
-                    NodeTitleOrMovie::Movie(movie) => if !movie_ids.contains(&movie.id) { movie_ids.push(movie.id) },
-                }
+    for directory_id in directory_ids {
+        let directory: DirectoryDocument = handle_directory_content(&client, &directory_id, &locale).await?;
+        let directory = directory.directory;
+        assert!(directory.contents.is_some());
+        for content in directory.contents.unwrap().content {
+            match content.title_or_movie {
+                NodeTitleOrMovie::Title(title) => if !title_ids.contains(&title.id) { title_ids.push(title.id) },
+                NodeTitleOrMovie::Movie(movie) => if !movie_ids.contains(&movie.id) { movie_ids.push(movie.id) },
             }
-        }
-
-        for title_id in title_ids {
-            let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, args.omit_ninja_contents).await?;
-            let title = content.title;
-
-            if title.aoc_available {
-                println!("  Fetching DLC list");
-                let dlc_resp = get_with_retry(&client, format!("{}/title/{}/aocs?shop_id={}&lang={}",
-                                                        samurai_baseurl(&locale.region), title_id, shop_id, &locale.language)).await?;
-                fs::create_dir_all(format!("samurai/{}/{}/title/aocs", locale.region, locale.language)).unwrap();
-                let mut file = File::create(format!("samurai/{}/{}/title/aocs/{}", locale.region, locale.language, title_id)).unwrap();
-                write!(file, "{}", dlc_resp)?;
-            }
-
-            if title.demo_available {
-                assert!(title.demo_titles.is_some());
-                for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
-                    let _: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, args.omit_ninja_contents).await?;
-                }
-            }
-        }
-
-        for movie_id in movie_ids {
-            let _: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, args.omit_ninja_contents).await?;
         }
     }
 
-    // Fetch referenced media resources
-    let dir_entries = std::fs::read_dir(format!("samurai/{}", &args.region)).into_iter().flatten().flatten();
+    for title_id in title_ids {
+        let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, args.omit_ninja_contents).await?;
+        let title = content.title;
+
+        if title.aoc_available {
+            println!("  Fetching DLC list");
+            let dlc_resp = get_with_retry(&client, format!("{}/title/{}/aocs?shop_id={}&lang={}",
+                                                    samurai_baseurl(&locale.region), title_id, shop_id, &locale.language)).await?;
+            fs::create_dir_all(format!("samurai/{}/{}/title/aocs", locale.region, locale.language)).unwrap();
+            let mut file = File::create(format!("samurai/{}/{}/title/aocs/{}", locale.region, locale.language, title_id)).unwrap();
+            write!(file, "{}", dlc_resp)?;
+        }
+
+        if title.demo_available {
+            assert!(title.demo_titles.is_some());
+            for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
+                let _: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, args.omit_ninja_contents).await?;
+            }
+        }
+    }
+
+    for movie_id in movie_ids {
+        let _: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, args.omit_ninja_contents).await?;
+    }
+
+    Ok(())
+}
+
+async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let dir_entries = std::fs::read_dir(format!("samurai/{}", region)).into_iter().flatten().flatten();
 
     for subdir in dir_entries.filter(|f| f.file_type().unwrap().is_dir()) {
-        println!("Region {}!", &args.region);
-        println!("Subdir {}!", &subdir.path().display());
+        println!("Gathering media resources for region {} / language {}", region, subdir.file_name().to_str().unwrap());
 
         let contained_files_iter = |path| {
             std::fs::read_dir(path)
@@ -845,7 +778,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
 
         for directory in contained_files_iter(subdir.path().join("directory")) {
-            println!("Directory {}", &directory.path().display());
+            println!(" Directory {}", &directory.path().display());
             let parsed_xml: DirectoryDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(directory.path()).unwrap()).unwrap()).unwrap();
             let directory = parsed_xml.directory;
             assert!(directory.contents.is_some());
@@ -859,7 +792,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for title in contained_files_iter(subdir.path().join("title")) {
-            println!("Title {}", &title.path().display());
+            println!(" Title {}", &title.path().display());
             let parsed_xml: TitleDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(title.path()).unwrap()).unwrap()).unwrap();
             let title = parsed_xml.title;
 
@@ -917,6 +850,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let demo_path = subdir.path().join("demo").join(&demo_title.id);
                     if !demo_path.exists() {
                         println!("  WARNING: Title references demo {}, but there is no metadata at {}", demo_title.id, demo_path.display());
+                        println!("  -------- Press Enter to continue --------");
+                        use std::io::Read;
+                        let _ = std::io::stdin().read(&mut [0u8]);
+                        println!("           Continuing in 5 seconds...");
                         thread::sleep(time::Duration::from_secs(5));
                     }
                 }
@@ -924,7 +861,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for demo in contained_files_iter(subdir.path().join("demo")) {
-            println!("Demo {}", &demo.path().display());
+            println!(" Demo {}", &demo.path().display());
 
             let parsed_xml: DemoDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(demo.path()).unwrap()).unwrap()).unwrap();
             let demo = parsed_xml.content.demo;
@@ -941,6 +878,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for movie in contained_files_iter(subdir.path().join("movie")) {
+            println!(" Movie {}", &movie.path().display());
+
             let parsed_xml: MovieDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(movie.path()).unwrap()).unwrap()).unwrap();
             let movie = parsed_xml.movie;
 
@@ -963,6 +902,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             thread::sleep(time::Duration::from_millis(FETCH_DELAY));
         }
     }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    RESOURCE_CACHE.get_or_init(|| Mutex::new(HashSet::new()));
+
+    let mut args = Args::parse();
+
+    let ssl_id = match args.cert {
+        Some(ref cert) => {
+            let cert_bytes = fs::read(cert)?;
+            Some(reqwest::Identity::from_pem(&cert_bytes)?)
+        },
+        None => {
+            if !args.omit_ninja_contents {
+                println!("3DS client certificate required to download data from Ninja servers.");
+                println!("Specify its location with --cert, or use --omit-ninja-contents to skip this data.");
+                println!("See Readme for details.");
+                std::process::exit(1);
+            }
+            None
+        },
+    };
+
+    args.fetch_videos |= args.fetch_all_videos;
+    if args.fetch_videos && !args.fetch_all_videos && args.title_id == None && args.movie_id == None && args.directory_id == None {
+        println!("Used --fetch-videos without constraint. This will download ALL videos from the eShop servers.");
+        println!("Use --title/--movie/--directory to restrict what contents to download videos for, or use --fetch-all-videos if you really need everything.");
+        std::process::exit(1);
+    }
+
+    let mut client_builder = reqwest::Client::builder()
+                            // Required to access eShop servers without a root CA
+                            .danger_accept_invalid_certs(true)
+                            // Required for SSL cert to be used
+                            .use_rustls_tls();
+    if ssl_id.is_some() {
+        client_builder = client_builder.identity(ssl_id.unwrap());
+    }
+    let client = client_builder.build()?;
+
+    fs::create_dir_all(format!("samurai/{}", args.region)).unwrap();
+    fs::create_dir_all(format!("kanzashi")).unwrap();
+    fs::create_dir_all(format!("kanzashi-movie")).unwrap();
+
+    // Fetch list of languages first
+    let languages: Vec<_> = {
+        let data = get_with_retry(&client, format!("{}/{}?shop_id={}", samurai_baseurl(&args.region), EndPoint::Languages, shop_id)).await?;
+        let mut file = File::create(format!("samurai/{}/languages", args.region)).unwrap();
+        write!(file, "{}", data)?;
+
+        let parsed_xml: LanguagesDocument = quick_xml::de::from_str(&data).unwrap();
+
+        if parsed_xml.languages.language.is_empty() {
+            println!("Could not find any supported languages for region {}", &args.region);
+            std::process::exit(1);
+        }
+
+        println!("Supported languages for region {}:", &args.region);
+        for NodeLanguage { name, iso_code } in &parsed_xml.languages.language {
+            println!("  {} ({})", iso_code, name);
+        }
+
+        parsed_xml.languages.language.into_iter().map(|lang| lang.iso_code).collect()
+    };
+
+    for language in languages {
+        println!("Fetching metadata for language \"{}\" of region {}", language, args.region);
+        let locale = Locale { region: args.region.clone(), language: language.to_owned() };
+        fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
+
+        fetch_metadata(&client, &locale, &args).await?;
+    }
+
+    fetch_media_resources(&client, &args.region, &args).await?;
 
     Ok(())
 }
