@@ -799,6 +799,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     NodeTitleOrMovie::Movie(movie) => if !movie_ids.contains(&movie.id) { movie_ids.push(movie.id) },
                 }
             }
+        }
+
+        for title_id in title_ids {
+            let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, args.omit_ninja_contents).await?;
+            let title = content.title;
+
+            if title.aoc_available {
+                println!("  Fetching DLC list");
+                let dlc_resp = get_with_retry(&client, format!("{}/title/{}/aocs?shop_id={}&lang={}",
+                                                        samurai_baseurl(&locale.region), title_id, shop_id, &locale.language)).await?;
+                fs::create_dir_all(format!("samurai/{}/{}/title/aocs", locale.region, locale.language)).unwrap();
+                let mut file = File::create(format!("samurai/{}/{}/title/aocs/{}", locale.region, locale.language, title_id)).unwrap();
+                write!(file, "{}", dlc_resp)?;
+            }
+
+            if title.demo_available {
+                assert!(title.demo_titles.is_some());
+                for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
+                    let _: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, args.omit_ninja_contents).await?;
+                }
+            }
+        }
+
+        for movie_id in movie_ids {
+            let _: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, args.omit_ninja_contents).await?;
+        }
+    }
+
+    // Fetch referenced media resources
+    let dir_entries = std::fs::read_dir(format!("samurai/{}", &args.region)).into_iter().flatten().flatten();
+
+    for subdir in dir_entries.filter(|f| f.file_type().unwrap().is_dir()) {
+        println!("Region {}!", &args.region);
+        println!("Subdir {}!", &subdir.path().display());
+
+        let contained_files_iter = |path| {
+            std::fs::read_dir(path)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|f| f.file_type().unwrap().is_file())
+        };
+
+        let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
+
+        for directory in contained_files_iter(subdir.path().join("directory")) {
+            println!("Directory {}", &directory.path().display());
+            let parsed_xml: DirectoryDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(directory.path()).unwrap()).unwrap()).unwrap();
+            let directory = parsed_xml.directory;
+            assert!(directory.contents.is_some());
+
+            println!("  Name: {}", &directory.name.replace("\n", " "));
 
             if let Some(icon_url) = directory.icon_url {
                 fetch_resource(&client, "icon", &icon_url).await?;
@@ -806,11 +858,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             fetch_resource(&client, "banner", &directory.banner_url).await?;
         }
 
-        let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
+        for title in contained_files_iter(subdir.path().join("title")) {
+            println!("Title {}", &title.path().display());
+            let parsed_xml: TitleDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(title.path()).unwrap()).unwrap()).unwrap();
+            let title = parsed_xml.title;
 
-        for title_id in title_ids {
-            let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, args.omit_ninja_contents).await?;
-            let title = content.title;
+            println!("  Name: {}", &title.name.replace("\n", " "));
 
             if let Some(icon_url) = title.icon_url {
                 fetch_resource(&client, "icon", &icon_url).await?;
@@ -824,6 +877,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for rating_icon in icons_from_rating_info(title.rating_info) {
                 fetch_resource(&client, "rating icon", &rating_icon.url).await?;
             }
+
             for screenshot in title.screenshots.screenshot {
                 for image_url in screenshot.image_url {
                     let resource_name = match image_url.screen {
@@ -837,15 +891,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             // TODO: urls, alternate_rating_image_url
-
-            if title.aoc_available {
-                println!("  Fetching DLC list");
-                let dlc_resp = get_with_retry(&client, format!("{}/title/{}/aocs?shop_id={}&lang={}",
-                                                        samurai_baseurl(&locale.region), title_id, shop_id, &locale.language)).await?;
-                fs::create_dir_all(format!("samurai/{}/{}/title/aocs", locale.region, locale.language)).unwrap();
-                let mut file = File::create(format!("samurai/{}/{}/title/aocs/{}", locale.region, locale.language, title_id)).unwrap();
-                write!(file, "{}", dlc_resp)?;
-            }
 
             if args.fetch_videos {
                 fs::create_dir_all(format!("kanzashi-movie")).unwrap();
@@ -865,42 +910,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         fetch_movie_file(&client, &file).await?;
                     }
                 }
-                // TODO: Resources? Banner, thumbnail
             }
 
             if title.demo_available {
-                assert!(title.demo_titles.is_some());
                 for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
-                    // NOTE: There are no demos with associated videos, banners, or thumbnails
-                    let demo: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, args.omit_ninja_contents).await?;
-                    if let Some(icon_url) = demo.content.demo.icon_url {
-                        fetch_resource(&client, "icon", &icon_url).await?;
-                    }
-                    for rating_icon in icons_from_rating_info(demo.content.demo.rating_info) {
-                        fetch_resource(&client, "rating icon", &rating_icon.url).await?;
+                    let demo_path = subdir.path().join("demo").join(&demo_title.id);
+                    if !demo_path.exists() {
+                        println!("  WARNING: Title references demo {}, but there is no metadata at {}", demo_title.id, demo_path.display());
+                        thread::sleep(time::Duration::from_secs(5));
                     }
                 }
             }
+        }
+
+        for demo in contained_files_iter(subdir.path().join("demo")) {
+            println!("Demo {}", &demo.path().display());
+
+            let parsed_xml: DemoDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(demo.path()).unwrap()).unwrap()).unwrap();
+            let demo = parsed_xml.content.demo;
+
+            if let Some(icon_url) = demo.icon_url {
+                fetch_resource(&client, "icon", &icon_url).await?;
+            }
+            for rating_icon in icons_from_rating_info(demo.rating_info) {
+                fetch_resource(&client, "rating icon", &rating_icon.url).await?;
+            }
+            // NOTE: There are no demos with associated videos, banners, or thumbnails
 
             thread::sleep(time::Duration::from_millis(FETCH_DELAY));
         }
 
-        for movie_id in movie_ids {
-            let movie_doc: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, args.omit_ninja_contents).await?;
+        for movie in contained_files_iter(subdir.path().join("movie")) {
+            let parsed_xml: MovieDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(movie.path()).unwrap()).unwrap()).unwrap();
+            let movie = parsed_xml.movie;
 
-            if let Some(banner_url) = movie_doc.movie.banner_url {
+            if let Some(banner_url) = movie.banner_url {
                 fetch_resource(&client, "banner", &banner_url).await?;
             }
-            if let Some(thumbnail_url) = movie_doc.movie.thumbnail_url {
+            if let Some(thumbnail_url) = movie.thumbnail_url {
                 fetch_resource(&client, "thumbnail", &thumbnail_url).await?;
             }
-            for rating_icon in icons_from_rating_info(movie_doc.movie.rating_info) {
+            for rating_icon in icons_from_rating_info(movie.rating_info) {
                 fetch_resource(&client, "rating icon", &rating_icon.url).await?;
             }
             // TODO: urls, alternate_rating_image_url
 
             if args.fetch_videos {
-                for file in movie_doc.movie.files.file {
+                for file in movie.files.file {
                     fetch_movie_file(&client, &file).await?;
                 }
             }
