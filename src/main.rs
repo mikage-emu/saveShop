@@ -1,6 +1,7 @@
 use std::fs;
 use std::fs::File;
 use std::io::Write;
+use std::collections::HashSet;
 
 use std::fmt;
 
@@ -8,10 +9,12 @@ use std::thread;
 use std::time;
 
 use clap::Parser;
-use clap::ValueEnum;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+
+use std::sync::Mutex;
+use once_cell::sync::OnceCell;
 
 const shop_id: i32 = 1; // 3DS
 // const shop_id: i32 = 2; // Wii U?
@@ -516,8 +519,17 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
     Ok(directory_info.unwrap())
 }
 
+// There are many duplicate resource references across titles/languages/regions,
+// so cache the download urls already processed
+static RESOURCE_CACHE: OnceCell<Mutex<HashSet<String>>> = OnceCell::new();
+
 async fn fetch_resource(client: &reqwest::Client, resource_name: &str, url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    println!("  Fetching {} from {}", resource_name, url);
+    let already_cached: bool = !RESOURCE_CACHE.get().unwrap().lock().unwrap().insert(url.to_string());
+    println!("  Fetching {} from {}{}", resource_name, url, if already_cached { " (cached)" } else { "" });
+    if already_cached {
+        return Ok(());
+    }
+
     let filename = url_to_filename(url);
 
     let mut retries = 0;
@@ -634,11 +646,16 @@ fn url_to_filename(url: &str) -> String {
 }
 
 async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Result<(), Box<dyn std::error::Error>> {
+    let already_cached: bool = !RESOURCE_CACHE.get().unwrap().lock().unwrap().insert(file.movie_url.to_string());
+    println!("  Fetching movie from {}{}", file.movie_url, if already_cached { " (cached)" } else { "" });
+    if already_cached {
+        return Ok(());
+    }
+
     let filename = format!("kanzashi-movie/{}", file.movie_url.strip_prefix("https://kanzashi-movie-ctr.cdn.nintendo.net/m/").unwrap());
     assert_eq!("moflex", std::path::Path::new(&filename).extension().unwrap());
     let mp4_filename = std::path::Path::new(&filename).with_extension("mp4");
 
-    println!("  Fetching movie from {}", file.movie_url);
     let response = client.get(&file.movie_url).send().await?;
     // Skip if content size matches the moflex on disk *and* if a converted mp4 already exists
     if let Ok(existing_file) = fs::metadata(&filename) {
@@ -677,6 +694,8 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    RESOURCE_CACHE.get_or_init(|| Mutex::new(HashSet::new()));
+
     let mut args = Args::parse();
 
     let ssl_id = match args.cert {
