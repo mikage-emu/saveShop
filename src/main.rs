@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 const shop_id: i32 = 1; // 3DS
 // const shop_id: i32 = 2; // Wii U?
 
-const fetch_delay: u64 = 1;
+const FETCH_DELAY: u64 = 100;
 
 async fn get_with_retry<U: reqwest::IntoUrl + Clone>(client: &reqwest::Client, url: U) -> Result<String, reqwest::Error> {
     let mut retries = 0;
@@ -337,7 +337,7 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint)
             full_list.push(doc_footer.to_owned());
             break;
         }
-        thread::sleep(time::Duration::from_millis(fetch_delay));
+        thread::sleep(time::Duration::from_millis(FETCH_DELAY));
     }
 
     let mut file = File::create(format!("samurai/contents")).unwrap();
@@ -442,7 +442,7 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str) 
             full_list.push(doc_footer.to_owned());
             break;
         }
-        thread::sleep(time::Duration::from_millis(fetch_delay));
+        thread::sleep(time::Duration::from_millis(FETCH_DELAY));
     }
 
     fs::create_dir_all(format!("samurai/directory")).unwrap();
@@ -775,7 +775,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        thread::sleep(time::Duration::from_millis(fetch_delay));
+        thread::sleep(time::Duration::from_millis(FETCH_DELAY));
     }
 
     for movie_id in movie_ids {
@@ -797,7 +797,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fetch_movie_file(&client, &file).await?;
             }
         }
-        thread::sleep(time::Duration::from_millis(fetch_delay));
+        thread::sleep(time::Duration::from_millis(FETCH_DELAY));
     }
 
     Ok(())
