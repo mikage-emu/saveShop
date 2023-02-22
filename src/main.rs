@@ -305,6 +305,8 @@ struct NodeContents {
     #[serde(rename = "@total", default = "default_to_one")]
     total: usize,
 
+    // Some regions report no contents
+    #[serde(default)]
     content: Vec<NodeContent>,
 }
 
@@ -315,6 +317,8 @@ struct NodeEshop {
 
 #[derive(Deserialize)]
 struct NodeEshopDirectoryList {
+    // Some regions report no directories
+    #[serde(default)]
     directory: Vec<NodeDirectory>,
 }
 
@@ -334,11 +338,16 @@ enum ContentType {
 async fn fetch_directory_list(client: &reqwest::Client, locale: &Locale) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let resp = get_with_retry(client, format!(  "{}/directories?shop_id={}&lang={}",
                                     samurai_baseurl(&locale.region), shop_id, &locale.language)).await?;
-    let doc: NodeEshopDirectories = quick_xml::de::from_str(&resp).unwrap();
-    Ok(doc.directories.directory.into_iter().map(|dir| {
-        println!("Directory {}: {}", dir.id, dir.name.replace("\n", " ").replace("<br>", ""));
-        dir.id
-    }).collect())
+    let doc: Result<NodeEshopDirectories, _> = quick_xml::de::from_str(&resp);
+    match doc {
+        Ok(doc) =>
+            Ok(doc.directories.directory.into_iter().map(|dir| {
+                println!("Directory {}: {}", dir.id, dir.name.replace("\n", " ").replace("<br>", ""));
+                dir.id
+            }).collect()),
+        // Some regions return an error page for this, but empty lists on other types of content. Just return an empty list here too, hence.
+        Err(_) => Ok(Vec::new())
+    }
 }
 
 async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint, locale: &Locale)
@@ -353,7 +362,12 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint, locale
 
         let doc: NodeEshop = quick_xml::de::from_str(&resp).unwrap();
 
-        println!("Contents {}-{}, {} total", offset, offset + doc.contents.length.unwrap_or(doc.contents.total) - 1, doc.contents.total);
+        if doc.contents.total == 0 {
+            println!("No contents available");
+            break;
+        }
+
+        println!("Contents {}-{}, {} total", offset, (offset + doc.contents.length.unwrap_or(doc.contents.total - offset)).saturating_sub(1), doc.contents.total);
         assert_eq!(doc.contents.offset.unwrap_or(0), offset);
         assert_eq!(doc.contents.content.len(), doc.contents.length.unwrap_or(doc.contents.total));
         assert!(doc.contents.content.len() <= doc.contents.total);
