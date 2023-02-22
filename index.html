@@ -1,3 +1,4 @@
+<!DOCTYPE html>
 <html>
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
@@ -5,6 +6,43 @@
 body {
   background: burlywood;
 }
+.region_list {
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 2em;
+  width: 40%;
+  margin: auto;
+  row-gap: 1.25em;
+  column-gap: 1.25em;
+  text-align: center;
+}
+.region_flag {
+  width: 2em;
+  color: black;
+  text-decoration: none;
+}
+.region_flag:hover {
+  color: beige;
+}
+.region_lang_selector {
+  position: absolute;
+  display: flex;
+  border-radius: 0.5em;
+  background-color: beige;
+  padding: 0.25em 1em;
+  border: 1px solid black;
+
+  font-size: 0.75em;
+  justify-content: space-between;
+  column-gap: 0.5em;
+
+  /* Translate to center of parent element (width 2em) */
+  transform: translateX(-50%) translateX(1em) translateY(-0.25em);
+
+  transition: opacity 0.1s ease-out,
+              visibility 0.1s ease-out;
+}
+
 .title_card {
   display: flex;
   flex-direction: column;
@@ -29,10 +67,19 @@ body {
 </head>
 <body>
 
-<div style="margin: auto; width: 50%; display: flex; justify-content: space-between; align-items: center">
-  <a id="content-prev" style="font-size: 2em" href="#">Previous 50</a>
-  <img id="directory-banner" />
-  <a id="content-next" style="font-size: 2em" href="#">Next 50</a>
+<div id="navigation">
+  <div style="margin: auto; width: 50%; display: flex; justify-content: space-between; align-items: center">
+    <a id="content-prev" style="font-size: 2em" href="#">← 50</a>
+    <a style="font-size: 2em" href="#regions">regions</a>
+    <a style="font-size: 2em" href="#contents?content-type=directory&content-start=0">categories</a>
+    <a style="font-size: 2em" href="#contents?content-type=title&content-start=0">apps</a>
+    <a style="font-size: 2em" href="#contents?content-type=movie&content-start=0">videos</a>
+    <a id="content-next" style="font-size: 2em" href="#">50 →</a>
+  </div>
+  <div style="width: 50%; text-align: center; margin: auto">
+    <img id="directory-banner" />
+    <span id="directory-description" style="display: block; color: maroon"></span>
+  </div>
 </div>
 <p id="root"></p>
 
@@ -64,51 +111,81 @@ body {
     }
   };
 
-  let xhr = new XMLHttpRequest();
-  xhr.open('GET', 'samurai/contents');
-//  xhr.open('GET', 'samurai/directory/1095230'); // TODO: Parse from argument list
-  let xmlDoc;
-  let titles;
-  let content_type = "title"; // TODO: Parse from argument list
-  xhr.onreadystatechange = () => {
-    if (xhr.readyState !== XMLHttpRequest.DONE) {
+  // Search arguments from client-side route
+  let search_args = new URLSearchParams();
+
+  // Search results displayed on the current page
+  let search_results = [];
+
+  let previous_route = null;
+
+  window.onhashchange = reload;
+  reload();
+
+  function populateRegionList(containerNode) {
+    const regions = [
+        "AD", "AE", "AG", "AI", "AL", "AN", "AR", "AT", "AU", "AW", "AZ", "BA",
+        "BB", "BE", "BG", "BM", "BO", "BR", "BS", "BW", "BZ", "CA", "CH", "CL",
+        "CN", "CO", "CR", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "EC", "EE",
+        "ER", "ES", "FI", "FR", "GB", "GD", "GF", "GG", "GI", "GP", "GR", "GT",
+        "GY", "HK", "HN", "HR", "HT", "HU", "IE", "IL", "IM", "IN", "IS", "IT",
+        "JE", "JM", "JP", "KN", "KR", "KY", "LC", "LI", "LS", "LT", "LU", "LV",
+        "MC", "ME", "MK", "ML", "MQ", "MR", "MS", "MT", "MX", "MY", "MZ", "NA",
+        "NE", "NI", "NL", "NO", "NZ", "PA", "PE", "PL", "PT", "PY", "RO", "RS",
+        "RU", "SA", "SD", "SE", "SG", "SI", "SK", "SM", "SO", "SR", "SV", "SZ",
+        "TC", "TD", "TR", "TT", "TW", "US", "UY", "VA", "VC", "VE", "VG", "VI",
+        "ZA", "ZM", "ZW",
+    ];
+
+    Promise.all(regions.map(r => fetch(`samurai/${r}/languages`))).then(responses => {
+      // Wait for all responses, removing any requests that failed
+      Promise.all(responses.map(xml => (xml.ok ? xml.text() : Promise.resolve(null)))).then(all_xmls => all_xmls.forEach((xml, index) => {
+        if (!xml) {
+          return;
+        }
+
+        let region = regions[index];
+        let node = document.createElement("span");
+        node.className = "region_flag";
+        node.textContent = String.fromCodePoint(...region.split('').map(ch => ch.codePointAt(0) - 65 + 0x1F1E6)) + ` ${region}`;
+
+        let languages = document.createElement("div")
+        languages.className = "region_lang_selector";
+        {
+            let parser = new DOMParser();
+            let xmlDoc = parser.parseFromString(xml, "text/xml");
+            for (lang of Array.from(xmlDoc.querySelectorAll(`languages > language`))) {
+              let lang_element = document.createElement("a");
+              lang_element.textContent = lang.getElementsByTagName("name")[0].textContent;
+              lang_element.href = `#contents?region=${region}&language=${lang.getElementsByTagName("iso_code")[0].textContent}&content-type=title&content-start=0`;
+              languages.appendChild(lang_element);
+            }
+        }
+        languages.style.visibility = "hidden";
+        languages.style.opacity = 0;
+        node.appendChild(languages)
+        node.onclick = () => {
+          for (active_langs of document.getElementsByClassName("region_lang_selector")) {
+            active_langs.style.opacity = 0;
+            active_langs.style.visibility = "hidden"
+          }
+          languages.style.visibility = "visible"
+          languages.style.opacity = 1;
+        }
+        containerNode.appendChild(node);
+      }));
+    });
+  }
+
+  function populateContentList(args, containerNode, titles) {
+    if (args.content_type == "directory") {
+      populateDirectoryList(args, containerNode, titles);
       return;
     }
-    parser = new DOMParser();
-    xmlDoc = parser.parseFromString(xhr.responseText, "text/xml");
-    titles = xmlDoc.querySelectorAll(`contents > content > ${content_type}`);
 
-    window.onhashchange = reload;
-    reload();
-  };
+    for (let title_index = args.content_start; title_index < Math.min(titles.length, args.content_start + args.content_length); ++title_index) {
+      let content_type = titles[title_index].nodeName;
 
-  function reload() {
-    let args = window.location.hash.substring(1).split("&");
-    if (args.length == 1 && args[0] == [""]) {
-      args = [];
-    }
-    args = new Map(args.map(arg => arg.split("=")));
-    let content_start = parseInt(args.get("content-start") ?? "0");
-    let content_length = parseInt(args.get("content-length") ?? "50");
-    {
-      let prev_button = document.getElementById("content-prev");
-      prev_button.style["pointer-events"] = (content_start == 0) ? "none" : "";
-      document.getElementById("content-prev").href = `#content-start=${Math.max(0, content_start - content_length)}`;
-
-      let next_button = document.getElementById("content-next");
-      next_button.style["pointer-events"] = (content_start + content_length >= titles.length) ? "none" : "";
-      next_button.href = `#content-start=${content_start + content_length}`;
-    }
-
-    {
-      let directoryBanner = xmlDoc.querySelector("directory > banner_url");
-      document.getElementById("directory-banner").src = directoryBanner ? map_url(directoryBanner.textContent) : "";
-    }
-
-    const containerNode = document.createElement("div");
-    containerNode.className = "title_card";
-
-    for (let title_index = content_start; title_index < Math.min(titles.length, content_start + content_length); ++title_index) {
       const node = document.createElement("div");
       node.className = "title_card_contents";
       let title = titles[title_index];
@@ -126,17 +203,18 @@ body {
         if (icon) {
           headerNode.innerHTML = `<img src="` + map_url(icon.textContent) + `" />`;
         }
-        console.log(title.getElementsByTagName("name")[0].textContent.replace("\n", "<br>") + ": " + contentId)
         headerNode.innerHTML += `<span style="margin-left: 0.5em; font-size: 1.25em">` + title.getElementsByTagName("name")[0].textContent.replace("\n", "<br>").replace("<br><br>", "<br>") + `</span>`;
 
         // Render stars
         // TODO: Support fractional star display
         const score = title.querySelector(`${content_type} > star_rating_info > score`)?.textContent
-        let starHtml = `<span class="num-stars-label" style="margin-left: auto; color: gray">${score ? "" : "(unrated)"}</span><span>`;
-        for (let i = 0; i < 5; ++i) {
-          starHtml += `<span style="color: orange">` + (i < (+score + 0.25) ? "★" : "☆") + `</span>`;
+        if (score || content_type != "directory") {
+          let starHtml = `<span class="num-stars-label" style="margin-left: auto; color: gray">${score ? "" : "(unrated)"}</span><span>`;
+          for (let i = 0; i < 5; ++i) {
+            starHtml += `<span style="color: orange">` + (i < (+score + 0.25) ? "★" : "☆") + `</span>`;
+          }
+          headerNode.innerHTML += starHtml + `</span>`;
         }
-        headerNode.innerHTML += starHtml + `</span>`;
 
         node.appendChild(headerNode);
       }
@@ -148,7 +226,7 @@ body {
         const rating = title.getElementsByTagName("rating")[0];
         ratingInfo.innerHTML = ratingSystem.getElementsByTagName("name")[0].textContent;
         ratingInfo.innerHTML += `: ` + rating.getElementsByTagName("name")[0].textContent;
-      } else {
+      } else if (content_type != "directory") {
         ratingInfo.innerHTML = "(no content rating)";
       }
       node.appendChild(ratingInfo);
@@ -200,7 +278,7 @@ body {
 
         child.appendChild(secondaryHeader);
 
-        withRequestedResource(`samurai/${content_type}/${contentId}`, response => {
+        withRequestedResource(`samurai/${args.region}/${args.language}/${content_type}/${contentId}`, response => {
             let xml = parser.parseFromString(response, "text/xml");
 
             let thumbnail_urls = Array.from(xml.querySelectorAll(`${content_type} > thumbnails > thumbnail`),
@@ -231,8 +309,6 @@ body {
 
             let data = Array.from(xml.querySelectorAll(`${content_type} > screenshots > screenshot`),
                 node => {
-                    //upper = map_url(node.querySelector("image_url[type=upper]").textContent);
-                    //lower = map_url(node.querySelector("image_url[type=lower]").textContent);
                     let upper = node.querySelector("image_url[type=upper]");
                     let lower = node.querySelector("image_url[type=lower]");
                     if (lower || upper) {
@@ -266,7 +342,7 @@ body {
         });
 
         if (content_type == "title") {
-          withRequestedResource(encodeURIComponent(`ninja/titles/online_prices%3Ftitle%5B%5D%3D${contentId}`), response => {
+          withRequestedResource(encodeURIComponent(`ninja/${args.region}/${args.language}/titles/online_prices%3Ftitle%5B%5D%3D${contentId}`), response => {
             let xml = parser.parseFromString(response,"text/xml");
             child.getElementsByClassName("price-label")[0].textContent = xml.getElementsByTagName("amount")[0].textContent;
           });
@@ -279,12 +355,147 @@ body {
 
       containerNode.appendChild(node);
     }
+  }
+
+  function populateDirectoryList(args, containerNode, titles) {
+    let content_type = args.content_type;
+
+    for (let title_index = args.content_start; title_index < Math.min(titles.length, args.content_start + args.content_length); ++title_index) {
+      const node = document.createElement("a");
+      node.href= `#directory/${titles[title_index].getAttribute("id")}?content-type=%2A&content-start=0`;
+      node.className = "title_card_contents";
+      let title = titles[title_index];
+      const contentId = title.getAttribute("id");
+      {
+        let headerNode = document.createElement("div")
+        headerNode.style["display"] = "flex"
+        headerNode.style["align-items"] = "start"
+
+        let icon = title.getElementsByTagName("icon_url")[0];
+        headerNode.innerHTML = `<img src="` + map_url(icon.textContent) + `" />`;
+        headerNode.innerHTML += `<span style="margin-left: 0.5em; font-size: 1.25em">` + title.getElementsByTagName("name")[0].textContent.replace("\n", "<br>").replace("<br><br>", "<br>") + `</span>`;
+
+        node.appendChild(headerNode);
+      }
+
+      containerNode.appendChild(node);
+    }
+  }
+
+  function refreshNavigationBar(route, args) {
+    {
+      let prev_button = document.getElementById("content-prev");
+      prev_button.style["pointer-events"] = (args.content_start == 0) ? "none" : "";
+      prev_button.style.visibility = (args.content_start == 0) ? "hidden" : "visible";
+      document.getElementById("content-prev").href = `#${route}?content-start=${Math.max(0, args.content_start - args.content_length)}`;
+
+      let next_button = document.getElementById("content-next");
+      next_button.style["pointer-events"] = (args.content_start + args.content_length >= search_results.length) ? "none" : "";
+      next_button.style.visibility = (args.content_start + args.content_length >= search_results.length) ? "hidden" : "visible";
+      next_button.href = `#${route}?content-start=${args.content_start + args.content_length}`;
+    }
+
+    document.getElementById("navigation").style.visibility = (route == "regions") ? "hidden" : "";
+  }
+
+  function reload() {
+    let query_loc = window.location.hash.indexOf('?');
+    if (query_loc == -1) {
+      query_loc = window.location.hash.length;
+    }
+    let route = window.location.hash.substring(1, query_loc);
+    let route_changed = previous_route != route;
+    previous_route = route;
+    let query_string = window.location.hash.substring(query_loc);
+    if (route == "") {
+      route = "regions";
+    }
+
+    let previous_content_type = search_args.get("content-type") ?? "title";
+    for ([key, value] of new URLSearchParams(query_string)) {
+      search_args.set(key, value);
+    }
+    let args = {
+      region: search_args.get("region") ?? "US",
+      language: search_args.get("language") ?? "en",
+      content_start: parseInt(search_args.get("content-start") ?? 0),
+      content_length: parseInt(search_args.get("content-length") ?? 50),
+      content_type: search_args.get("content-type") ?? "*",
+    };
+    search_args.set("content-type", args.content_type);
+
+    // Serialize arguments back to window url
+    window.history.replaceState(null, null, window.location.pathname + "#" + route + "?" + search_args.toString());
+
+    const containerNode = document.createElement("div");
+
+    refreshNavigationBar(route, args);
+
+    if (route_changed) {
+      document.getElementById("directory-banner").src = "";
+      document.getElementById("directory-description").textContent = "";
+    }
+
+    if (route == "regions") {
+      containerNode.className = "region_list";
+      populateRegionList(containerNode);
+    } else if (route == "contents") {
+      containerNode.className = "title_card";
+
+      if (route_changed || args.content_type != previous_content_type) {
+        let xhr = new XMLHttpRequest();
+        xhr.open('GET', `samurai/${args.region}/${args.language}/${args.content_type == "directory" ? "directories" : "contents"}`);
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState !== XMLHttpRequest.DONE) {
+            return;
+          }
+          parser = new DOMParser();
+          let xmlDoc = parser.parseFromString(xhr.responseText, "text/xml");
+          // TODO: Support filters like "demo_available=true"
+          search_results = xmlDoc.querySelectorAll(args.content_type != "directory" ? `contents > content > ${args.content_type}` : `directories > directory` );
+          populateContentList(args, containerNode, search_results);
+
+          refreshNavigationBar(route, args);
+        };
+        xhr.send();
+      } else {
+        populateContentList(args, containerNode, search_results);
+      }
+    } else if (route.startsWith("directory/")) {
+      containerNode.className = "title_card";
+
+      if (route_changed || args.content_type != previous_content_type) {
+        let xhr = new XMLHttpRequest();
+        xhr.open('GET', `samurai/${args.region}/${args.language}/${route}`);
+        xhr.onreadystatechange = () => {
+          if (xhr.readyState !== XMLHttpRequest.DONE) {
+            return;
+          }
+          parser = new DOMParser();
+          let xmlDoc = parser.parseFromString(xhr.responseText, "text/xml");
+          search_results = xmlDoc.querySelectorAll(args.content_type != "directory" ? `contents > content > ${args.content_type}` : `directories > directory` );
+          populateContentList(args, containerNode, search_results);
+
+          {
+            let directoryBanner = xmlDoc.querySelector("directory > banner_url");
+            document.getElementById("directory-banner").src = directoryBanner ? map_url(directoryBanner.textContent) : "";
+
+            let directoryDesc = xmlDoc.querySelector("directory > description");
+            document.getElementById("directory-description").textContent = directoryDesc.textContent;
+          }
+
+          refreshNavigationBar(route, args);
+        };
+        xhr.send();
+      } else {
+        populateContentList(args, containerNode, search_results);
+      }
+    }
 
     document.getElementById("root").innerHTML = "";
     document.getElementById("root").appendChild(containerNode);
   }
-  xhr.send();
 </script>
 
 </body>
-</html> 
+</html>
