@@ -307,6 +307,19 @@ struct DirectoryDocument {
 }
 
 #[derive(Deserialize)]
+struct NodeRanking {
+    #[serde(rename = "@id")]
+    id: String,
+
+    contents: Option<NodeContents>,
+}
+
+#[derive(Deserialize)]
+struct RankingDocument {
+    ranking: NodeRanking,
+}
+
+#[derive(Deserialize)]
 struct NodeLanguage {
     iso_code: String,
     name: String,
@@ -365,6 +378,15 @@ struct NodeEshopDirectoryList {
 #[derive(Deserialize)]
 struct NodeEshopDirectories {
     directories: NodeEshopDirectoryList,
+}
+
+#[derive(Deserialize)]
+struct NodeEshopRankingList {
+    ranking: Vec<NodeRanking>,
+}
+#[derive(Deserialize)]
+struct NodeEshopRankings {
+    rankings: NodeEshopRankingList,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -571,6 +593,82 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
     Ok(directory_info.unwrap())
 }
 
+async fn handle_ranking_content(client: &reqwest::Client, ranking_id: &str, locale: &Locale) -> Result<RankingDocument, Box<dyn std::error::Error>> {
+    fs::create_dir_all(format!("samurai/{}/{}/ranking/paginated", locale.region, locale.language)).unwrap();
+
+    let mut ranking_info = None;
+
+    let mut offset = 0;
+    let mut full_list = Vec::new();
+    loop {
+        let resp = get_with_retry(client, format!(  "{}/ranking/{}?offset={}&shop_id={}&lang={}",
+                                        samurai_baseurl(&locale.region), ranking_id, offset, shop_id, &locale.language)).await?;
+
+        let mut file = File::create(format!("samurai/{}/{}/ranking/paginated/{}%3Foffset%3D{}", locale.region, locale.language, ranking_id, offset)).unwrap();
+        write!(file, "{}", &resp)?;
+
+        let doc: RankingDocument = quick_xml::de::from_str(&resp).unwrap();
+
+        let dummy = NodeContents { content: Vec::new(), length: Some(0), total: 0, offset: Some(0) };
+        let contents = doc.ranking.contents.as_ref().unwrap_or(&dummy);
+        if contents.total == 0 {
+            ranking_info = Some(doc);
+            full_list.push(resp);
+            break;
+        }
+
+        println!("  Ranking contents {}-{}, {} total", offset, offset + contents.length.unwrap_or(contents.total) - 1, contents.total);
+        assert_eq!(contents.offset.unwrap_or(0), offset);
+        assert_eq!(contents.content.len(), contents.length.unwrap_or(contents.total));
+        assert!(contents.content.len() <= contents.total);
+        // NOTE: For rankings, the reported "index" always starts at 1 even when results are reported across multiple pages
+        for content in &contents.content {
+            match &content.title_or_movie {
+                NodeTitleOrMovie::Title(title) => {
+                    println!("    Title {}: {}", title.id, title.name.replace("\n", " ").replace("<br>", ""));
+                },
+                NodeTitleOrMovie::Movie(movie) => {
+                    println!("    Movie {}: {}", movie.id, movie.name.replace("\n", " ").replace("<br>", ""));
+                }
+            }
+        }
+
+        offset += contents.content.len();
+        let total_contents = contents.total;
+
+        // Extract <contents> body and its surrounding bits, while dropping the opening <contents> tag.
+        // This makes it easy to merge the included <content> tags under a single, manually written <contents> node.
+        let (doc_header, contents_and_footer) = resp.split_at(resp.find("<contents ").unwrap());
+        let (_, contents_and_footer) = contents_and_footer.split_once(">").unwrap();
+        let (contents, doc_footer) = contents_and_footer.split_at(contents_and_footer.find("</contents>").unwrap());
+        if full_list.is_empty() {
+            full_list.push(doc_header.to_owned());
+            full_list.push(format!("<contents length=\"{}\" offset=\"0\" total=\"{}\">", total_contents, total_contents));
+        }
+        full_list.push(contents.to_owned());
+
+        if ranking_info.is_none() {
+            ranking_info = Some(doc);
+        } else {
+            let previous_contents = ranking_info.as_mut().unwrap().ranking.contents.as_mut().unwrap();
+            previous_contents.content.extend(doc.ranking.contents.unwrap().content.into_iter());
+        }
+
+        if offset == total_contents {
+            full_list.push(doc_footer.to_owned());
+            break;
+        }
+        thread::sleep(FETCH_DELAY);
+    }
+
+    let mut file = File::create(format!("samurai/{}/{}/ranking/{}", locale.region, locale.language, ranking_id)).unwrap();
+    for contents in full_list {
+        write!(file, "{}\n", contents)?;
+    }
+
+    Ok(ranking_info.unwrap())
+}
+
 // There are many duplicate resource references across titles/languages/regions,
 // so cache the download urls and content sizes
 static RESOURCE_CACHE: OnceCell<Mutex<HashMap<String, u64>>> = OnceCell::new();
@@ -630,10 +728,11 @@ enum EndPoint {
     Directories,
     Genres,
     Publishers,
+    PublisherContacts,
     Platforms,
     Languages,
-    // TODO: Rankings, searchcategory
-    // TODO: publishers/contacts
+    Rankings,
+    SearchCategory,
 }
 
 #[derive(clap::Args)]
@@ -714,8 +813,11 @@ impl fmt::Display for EndPoint {
             EndPoint::Directories => "directories",
             EndPoint::Genres => "genres",
             EndPoint::Publishers => "publishers",
+            EndPoint::PublisherContacts => "publishers/contacts",
             EndPoint::Platforms => "platforms",
             EndPoint::Languages => "languages",
+            EndPoint::Rankings => "rankings",
+            EndPoint::SearchCategory => "searchcategory"
         })
     }
 }
@@ -764,11 +866,20 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
 
 async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, metadata_args: &FetchMetadataArgs) -> Result<(), Box<dyn std::error::Error>> {
     // NOTE: We're fetching languages *again* here since language names are localized
-    for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms, EndPoint::Languages] {
+    for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::PublisherContacts, EndPoint::Platforms, EndPoint::SearchCategory, EndPoint::Languages, EndPoint::Rankings] {
         println!("Fetching endpoint {}", endpoint);
         let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
-        let mut file = File::create(format!("samurai/{}/{}/{}", locale.region, locale.language, endpoint)).unwrap();
+        let filename = format!( "samurai/{}/{}/{}", locale.region, locale.language,
+                                if matches!(endpoint, EndPoint::PublisherContacts) { "publishers_/contacts".to_owned() } else { endpoint.to_string() });
+        let mut file = File::create(filename).unwrap();
         write!(file, "{}", data)?;
+
+        if matches!(endpoint, EndPoint::Rankings) {
+            let parsed_xml: NodeEshopRankings = quick_xml::de::from_str(&data).unwrap();
+            for ranking in parsed_xml.rankings.ranking {
+                let _: RankingDocument = handle_ranking_content(&client, &ranking.id, &locale).await?;
+            }
+        }
     }
 
     let (mut title_ids, mut movie_ids, mut directory_ids) = match (&args.title_id, &args.movie_id, &args.directory_id) {
@@ -1264,7 +1375,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for language in languages {
                     println!("Fetching metadata for language \"{}\" of region {}", language, region);
                     let locale = Locale { region: region.to_string(), language: language.to_owned() };
-                    fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
+                    fs::create_dir_all(format!("samurai/{}/{}/publishers_", locale.region, locale.language)).unwrap();
 
                     fetch_metadata(&client, &locale, &args, &metadata_args).await?;
                 }
