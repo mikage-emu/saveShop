@@ -599,12 +599,52 @@ enum EndPoint {
     // TODO: publishers/contacts
 }
 
+#[derive(clap::Args)]
+struct FetchMetadataArgs {
+    /// Path to ctr-common-1 certificate in PEM format (see Readme)
+    #[clap(long, group = "cert-group")]
+    cert: Option<String>,
+
+    /// Skip data provided from "ninja" servers (prices, title ids, ...)
+    #[clap(long, action, group = "cert-group")]
+    omit_ninja_contents: bool,
+}
+
+#[derive(clap::Args)]
+struct FetchMediaArgs {
+    /// Download associated video files
+    #[clap(long, action)]
+    fetch_videos: bool,
+
+    /// Same as fetch-videos but needed to confirm unrestricted download of all videos
+    #[clap(long, action, hide=true)]
+    fetch_all_videos: bool,
+}
+
+#[derive(clap::Args)]
+struct FetchAllArgs {
+    #[clap(flatten)]
+    metadata: FetchMetadataArgs,
+
+    #[clap(flatten)]
+    media: FetchMediaArgs,
+}
+
+#[derive(clap::Subcommand)]
+enum SubCommand {
+    /// Fetch general title information
+    FetchMetadata(FetchMetadataArgs),
+    /// Fetch images and (optionally) videos for previously fetched metadata
+    FetchMedia(FetchMediaArgs),
+    /// Fetch both metadata and media
+    FetchAll(FetchAllArgs),
+}
+
 #[derive(Parser)]
 #[clap(global_setting(clap::AppSettings::DeriveDisplayOrder))]
 struct Args {
-    /// eShop region to fetch from
-    #[clap(long, possible_values=REGIONS)]
-    region: String,
+    #[clap(subcommand)]
+    command: SubCommand,
 
     /// Only fetch data for the given title
     #[clap(long = "title")]
@@ -618,21 +658,9 @@ struct Args {
     #[clap(long = "directory")]
     directory_id: Option<String>,
 
-    /// Download associated video files
-    #[clap(long, action)]
-    fetch_videos: bool,
-
-    /// Same as fetch-videos but needed to confirm unrestricted download of all videos
-    #[clap(long, action, hide=true)]
-    fetch_all_videos: bool,
-
-    /// Path to ctr-common-1 certificate in PEM format (see Readme for details)
-    #[clap(long, group = "cert-group")]
-    cert: Option<String>,
-
-    /// Skip data provided from "ninja" servers (prices, title ids, ...)
-    #[clap(long, action, group = "cert-group")]
-    omit_ninja_contents: bool,
+    /// eShop region to fetch from
+    #[clap(long, possible_values=REGIONS)]
+    region: String,
 }
 
 impl fmt::Display for EndPoint {
@@ -710,7 +738,7 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
     return Ok(());
 }
 
-async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, metadata_args: &FetchMetadataArgs) -> Result<(), Box<dyn std::error::Error>> {
     for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms] {
         println!("Fetching endpoint {}", endpoint);
         let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
@@ -752,7 +780,7 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args) 
     }
 
     for title_id in title_ids {
-        let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, args.omit_ninja_contents).await?;
+        let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, metadata_args.omit_ninja_contents).await?;
         let title = content.title;
 
         if title.aoc_available {
@@ -767,19 +795,19 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args) 
         if title.demo_available {
             assert!(title.demo_titles.is_some());
             for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
-                let _: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, args.omit_ninja_contents).await?;
+                let _: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, metadata_args.omit_ninja_contents).await?;
             }
         }
     }
 
     for movie_id in movie_ids {
-        let _: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, args.omit_ninja_contents).await?;
+        let _: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, metadata_args.omit_ninja_contents).await?;
     }
 
     Ok(())
 }
 
-async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Args, fetch_args: &FetchMediaArgs) -> Result<(), Box<dyn std::error::Error>> {
     let dir_entries = std::fs::read_dir(format!("samurai/{}", region)).into_iter().flatten().flatten();
 
     for subdir in dir_entries.filter(|f| f.file_type().unwrap().is_dir()) {
@@ -795,7 +823,18 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
 
         let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
 
+        let constrained_fetch = args.directory_id.is_some() || args.title_id.is_some() || args.movie_id.is_some();
+
+        let mut title_set = HashSet::<_>::from_iter(args.title_id.clone().into_iter());
+        let mut demo_set = HashSet::new();
+        let mut movie_set = HashSet::<_>::from_iter(args.movie_id.clone().into_iter());
+        let directory_set = HashSet::<_>::from_iter(args.directory_id.clone().into_iter());
+
         for directory in contained_files_iter(subdir.path().join("directory")) {
+            if constrained_fetch && !directory_set.contains(&directory.path().to_string_lossy().to_string()) {
+                continue;
+            }
+
             println!(" Directory {}", &directory.path().display());
             let parsed_xml: DirectoryDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(directory.path()).unwrap()).unwrap()).unwrap();
             let directory = parsed_xml.directory;
@@ -807,9 +846,21 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
                 fetch_resource(&client, "icon", &icon_url).await?;
             }
             fetch_resource(&client, "banner", &directory.banner_url).await?;
+
+            // Include titles and movies referenced by this directory
+            if constrained_fetch {
+                match &directory.contents.unwrap().content[0].title_or_movie {
+                    NodeTitleOrMovie::Title(title) => { title_set.insert(title.id.clone()); },
+                    NodeTitleOrMovie::Movie(movie) => { movie_set.insert(movie.id.clone()); },
+                };
+            }
         }
 
         for title in contained_files_iter(subdir.path().join("title")) {
+            if constrained_fetch && !title_set.contains(&title.path().to_string_lossy().to_string()) {
+                continue;
+            }
+
             println!(" Title {}", &title.path().display());
             let parsed_xml: TitleDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(title.path()).unwrap()).unwrap()).unwrap();
             let title = parsed_xml.title;
@@ -843,7 +894,7 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             }
             // TODO: urls, alternate_rating_image_url
 
-            if args.fetch_videos {
+            if fetch_args.fetch_videos {
                 fs::create_dir_all(format!("kanzashi-movie")).unwrap();
                 for movie in title.movies.map(|c| c.movie).unwrap_or_default() {
                     if let Some(banner_url) = movie.banner_url {
@@ -865,6 +916,8 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
 
             if title.demo_available {
                 for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
+                    demo_set.insert(demo_title.id.clone());
+
                     let demo_path = subdir.path().join("demo").join(&demo_title.id);
                     if !demo_path.exists() {
                         println!("  WARNING: Title references demo {}, but there is no metadata at {}", demo_title.id, demo_path.display());
@@ -879,6 +932,10 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
         }
 
         for demo in contained_files_iter(subdir.path().join("demo")) {
+            if constrained_fetch && !demo_set.contains(&demo.path().to_string_lossy().to_string()) {
+                continue;
+            }
+
             println!(" Demo {}", &demo.path().display());
 
             let parsed_xml: DemoDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(demo.path()).unwrap()).unwrap()).unwrap();
@@ -896,6 +953,10 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
         }
 
         for movie in contained_files_iter(subdir.path().join("movie")) {
+            if constrained_fetch && !movie_set.contains(&movie.path().to_string_lossy().to_string()) {
+                continue;
+            }
+
             println!(" Movie {}", &movie.path().display());
 
             let parsed_xml: MovieDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(movie.path()).unwrap()).unwrap()).unwrap();
@@ -912,7 +973,7 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             }
             // TODO: urls, alternate_rating_image_url
 
-            if args.fetch_videos {
+            if fetch_args.fetch_videos {
                 for file in movie.files.file {
                     fetch_movie_file(&client, &file).await?;
                 }
@@ -930,27 +991,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut args = Args::parse();
 
-    let ssl_id = match args.cert {
-        Some(ref cert) => {
-            let cert_bytes = fs::read(cert)?;
-            Some(reqwest::Identity::from_pem(&cert_bytes)?)
-        },
-        None => {
-            if !args.omit_ninja_contents {
-                println!("3DS client certificate required to download data from Ninja servers.");
-                println!("Specify its location with --cert, or use --omit-ninja-contents to skip this data.");
-                println!("See Readme for details.");
-                std::process::exit(1);
-            }
-            None
-        },
+    let ssl_id = match args.command {
+        SubCommand::FetchMetadata(ref args)
+        | SubCommand::FetchAll(FetchAllArgs { metadata: ref args, media: _ }) => match args.cert {
+            Some(ref cert) => {
+                let cert_bytes = fs::read(cert)?;
+                Some(reqwest::Identity::from_pem(&cert_bytes)?)
+            },
+            None => {
+                if !args.omit_ninja_contents {
+                    println!("3DS client certificate required to download data from Ninja servers.");
+                    println!("Specify its location with --cert, or use --omit-ninja-contents to skip this data.");
+                    println!("See Readme for details.");
+                    std::process::exit(1);
+                }
+                None
+            },
+        }
+        _ => None
     };
 
-    args.fetch_videos |= args.fetch_all_videos;
-    if args.fetch_videos && !args.fetch_all_videos && args.title_id == None && args.movie_id == None && args.directory_id == None {
-        println!("Used --fetch-videos without constraint. This will download ALL videos from the eShop servers.");
-        println!("Use --title/--movie/--directory to restrict what contents to download videos for, or use --fetch-all-videos if you really need everything.");
-        std::process::exit(1);
+    // Check if we should prompt for --fetch-all-videos to be added
+    match args.command {
+        SubCommand::FetchMedia(ref mut fetch_args)
+        | SubCommand::FetchAll(FetchAllArgs { metadata: _, media: ref mut fetch_args }) => {
+            fetch_args.fetch_videos |= fetch_args.fetch_all_videos;
+
+            let constrained_fetch = args.directory_id.is_some() || args.title_id.is_some() || args.movie_id.is_some();
+
+            // TODO: Move the arguments here into a mode-specific subargs struct
+            if fetch_args.fetch_videos && !fetch_args.fetch_all_videos && !constrained_fetch {
+                println!("\nUsed --fetch-videos without constraint.");
+                println!("Do you *really* you want to download *ALL* videos from the eShop servers?");
+                println!("Use --title/--movie/--directory to restrict what contents to download videos for, or use --fetch-all-videos if you really need everything.");
+                std::process::exit(1);
+            }
+        },
+        _ => {}
     }
 
     let mut client_builder = reqwest::Client::builder()
@@ -988,15 +1065,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         parsed_xml.languages.language.into_iter().map(|lang| lang.iso_code).collect()
     };
 
-    for language in languages {
-        println!("Fetching metadata for language \"{}\" of region {}", language, args.region);
-        let locale = Locale { region: args.region.clone(), language: language.to_owned() };
-        fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
+    // Fetch content metadata
+    match args.command {
+        SubCommand::FetchMetadata(ref metadata_args)
+        | SubCommand::FetchAll(FetchAllArgs { metadata: ref metadata_args, media: _ }) => {
+            for language in languages {
+                println!("Fetching metadata for language \"{}\" of region {}", language, args.region);
+                let locale = Locale { region: args.region.to_string(), language: language.to_owned() };
+                fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
 
-        fetch_metadata(&client, &locale, &args).await?;
+                fetch_metadata(&client, &locale, &args, &metadata_args).await?;
+            }
+        },
+        _ => {},
+    };
+
+    // Fetch media
+    match args.command {
+        SubCommand::FetchMedia(ref fetch_args)
+        | SubCommand::FetchAll(FetchAllArgs { metadata: _, media: ref fetch_args }) => {
+            fetch_media_resources(&client, &args.region, &args, &fetch_args).await?;
+        }
+        _ => {},
     }
-
-    fetch_media_resources(&client, &args.region, &args).await?;
 
     Ok(())
 }
