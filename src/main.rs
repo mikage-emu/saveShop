@@ -658,9 +658,9 @@ struct Args {
     #[clap(long = "directory")]
     directory_id: Option<String>,
 
-    /// eShop region to fetch from
-    #[clap(long, possible_values=REGIONS)]
-    region: String,
+    /// Comma-delimited list of eShop regions to fetch from
+    #[clap(long, possible_values = REGIONS, required = true, use_delimiter = true)]
+    regions: Vec<String>,
 }
 
 impl fmt::Display for EndPoint {
@@ -1040,51 +1040,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let client = client_builder.build()?;
 
-    fs::create_dir_all(format!("samurai/{}", args.region)).unwrap();
     fs::create_dir_all(format!("kanzashi")).unwrap();
     fs::create_dir_all(format!("kanzashi-movie")).unwrap();
 
-    // Fetch list of languages first
-    let languages: Vec<_> = {
-        let data = get_with_retry(&client, format!("{}/{}?shop_id={}", samurai_baseurl(&args.region), EndPoint::Languages, shop_id)).await?;
-        let mut file = File::create(format!("samurai/{}/languages", args.region)).unwrap();
-        write!(file, "{}", data)?;
+    for region in &args.regions {
+        println!("Processing region {}", region);
+        fs::create_dir_all(format!("samurai/{}", region)).unwrap();
 
-        let parsed_xml: LanguagesDocument = quick_xml::de::from_str(&data).unwrap();
+        // Fetch list of languages first
+        let languages: Vec<_> = {
+            let data = get_with_retry(&client, format!("{}/{}?shop_id={}", samurai_baseurl(&region), EndPoint::Languages, shop_id)).await?;
+            let mut file = File::create(format!("samurai/{}/languages", region)).unwrap();
+            write!(file, "{}", data)?;
 
-        if parsed_xml.languages.language.is_empty() {
-            println!("Could not find any supported languages for region {}", &args.region);
-            std::process::exit(1);
-        }
+            let parsed_xml: LanguagesDocument = quick_xml::de::from_str(&data).unwrap();
 
-        println!("Supported languages for region {}:", &args.region);
-        for NodeLanguage { name, iso_code } in &parsed_xml.languages.language {
-            println!("  {} ({})", iso_code, name);
-        }
-
-        parsed_xml.languages.language.into_iter().map(|lang| lang.iso_code).collect()
-    };
-
-    // Fetch content metadata
-    match args.command {
-        SubCommand::FetchMetadata(ref metadata_args)
-        | SubCommand::FetchAll(FetchAllArgs { metadata: ref metadata_args, media: _ }) => {
-            for language in languages {
-                println!("Fetching metadata for language \"{}\" of region {}", language, args.region);
-                let locale = Locale { region: args.region.to_string(), language: language.to_owned() };
-                fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
-
-                fetch_metadata(&client, &locale, &args, &metadata_args).await?;
+            if parsed_xml.languages.language.is_empty() {
+                println!("Could not find any supported languages for region {}", &region);
+                std::process::exit(1);
             }
-        },
-        _ => {},
-    };
+
+            println!("Supported languages for region {}:", &region);
+            for NodeLanguage { name, iso_code } in &parsed_xml.languages.language {
+                println!("  {} ({})", iso_code, name);
+            }
+
+            parsed_xml.languages.language.into_iter().map(|lang| lang.iso_code).collect()
+        };
+
+        // Fetch content metadata
+        match args.command {
+            SubCommand::FetchMetadata(ref metadata_args)
+            | SubCommand::FetchAll(FetchAllArgs { metadata: ref metadata_args, media: _ }) => {
+                for language in languages {
+                    println!("Fetching metadata for language \"{}\" of region {}", language, region);
+                    let locale = Locale { region: region.to_string(), language: language.to_owned() };
+                    fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
+
+                    fetch_metadata(&client, &locale, &args, &metadata_args).await?;
+                }
+            },
+            _ => {},
+        };
+    }
 
     // Fetch media
     match args.command {
         SubCommand::FetchMedia(ref fetch_args)
         | SubCommand::FetchAll(FetchAllArgs { metadata: _, media: ref fetch_args }) => {
-            fetch_media_resources(&client, &args.region, &args, &fetch_args).await?;
+            for region in &args.regions {
+                fetch_media_resources(&client, &region, &args, &fetch_args).await?;
+            }
         }
         _ => {},
     }
