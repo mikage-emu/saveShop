@@ -390,10 +390,14 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint, locale
             }
         }
 
+        // Extract <contents> body and its surrounding bits, while dropping the opening <contents> tag.
+        // This makes it easy to merge the included <content> tags under a single, manually written <contents> node.
         let (doc_header, contents_and_footer) = resp.split_at(resp.find("<contents ").unwrap());
-        let (contents, doc_footer) = contents_and_footer.split_at(contents_and_footer.find("</eshop>").unwrap());
+        let (_, contents_and_footer) = contents_and_footer.split_once(">").unwrap();
+        let (contents, doc_footer) = contents_and_footer.split_at(contents_and_footer.find("</contents>").unwrap());
         if full_list.is_empty() {
             full_list.push(doc_header.to_owned());
+            full_list.push(format!("<contents length=\"{}\" offset=\"0\" total=\"{}\">", doc.contents.total, doc.contents.total));
         }
         full_list.push(contents.to_owned());
 
@@ -489,10 +493,14 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
         offset += contents.content.len();
         let total_contents = contents.total;
 
+        // Extract <contents> body and its surrounding bits, while dropping the opening <contents> tag.
+        // This makes it easy to merge the included <content> tags under a single, manually written <contents> node.
         let (doc_header, contents_and_footer) = resp.split_at(resp.find("<contents ").unwrap());
-        let (contents, doc_footer) = contents_and_footer.split_at(contents_and_footer.find("</directory>").unwrap());
+        let (_, contents_and_footer) = contents_and_footer.split_once(">").unwrap();
+        let (contents, doc_footer) = contents_and_footer.split_at(contents_and_footer.find("</contents>").unwrap());
         if full_list.is_empty() {
             full_list.push(doc_header.to_owned());
+            full_list.push(format!("<contents length=\"{}\" offset=\"0\" total=\"{}\">", total_contents, total_contents));
         }
         full_list.push(contents.to_owned());
 
