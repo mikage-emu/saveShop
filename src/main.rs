@@ -88,7 +88,13 @@ async fn get_with_retry_generic<U, C, F, Output>(request: &reqwest::RequestBuild
                 let headers = response.headers().clone();
                 match continuation(response).await {
                     Ok(response_text) => {
-                        log_headers(url, &headers);
+                        let resource_cache = RESOURCE_CACHE.get().unwrap();
+                        if matches!(resource_cache.lock().unwrap().get(&url.to_string()), None) {
+                            // Add dummy entry to resource cache to avoid logging the same request twice
+                            // (Note that logging itself happens in get_with_retry_generic)
+                            resource_cache.lock().unwrap().insert(url.to_string(), 1);
+                            log_headers(url, &headers);
+                        }
                         break Ok(response_text)
                     },
                     Err(err) => err,
@@ -460,8 +466,8 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
         ContentType::Movie => "movie",
         ContentType::Demo => "demo",
     };
-    let resp = get_with_retry(client, format!(  "{}/{}/{}?shop_id={}&lang={}",
-                                    samurai_baseurl(&locale.region), content_type_name, content_id, shop_id, &locale.language)).await?;
+    let url = format!(  "{}/{}/{}?shop_id={}&lang={}", samurai_baseurl(&locale.region), content_type_name, content_id, shop_id, &locale.language);
+    let resp = get_with_retry(client, url).await?;
 
     fs::create_dir_all(format!("samurai/{}/{}/{}", locale.region, locale.language, content_type_name)).unwrap();
     let mut file = File::create(format!("samurai/{}/{}/{}/{}", locale.region, locale.language, content_type_name, content_id)).unwrap();
@@ -1171,10 +1177,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut resource_cache = RESOURCE_CACHE.get().unwrap().lock().unwrap();
             for entry in cache.split_terminator(HTTP_HEADERS_SEPARATOR) {
                 let entry: serde_json::Value = serde_json::from_str(&entry)?;
-                if let Some(num_bytes) = entry["response_headers"]["content-length"].as_str() {
-                    let num_bytes: u64 = num_bytes.parse().unwrap();
-                    resource_cache.insert(entry["url"].as_str().unwrap().to_string(), num_bytes);
-                }
+                let num_bytes: u64 = match entry["response_headers"]["content-length"].as_str() {
+                    Some(num_bytes) => num_bytes.parse().unwrap(),
+                    None => 1 // Dummy size returned for transfer-encoding=chunked
+                };
+
+                resource_cache.insert(entry["url"].as_str().unwrap().to_string(), num_bytes);
             }
         }
     }
