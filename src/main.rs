@@ -20,7 +20,8 @@ use once_cell::sync::OnceCell;
 const shop_id: i32 = 1; // 3DS
 // const shop_id: i32 = 2; // Wii U?
 
-const FETCH_DELAY: u64 = 100;
+// Used to avoid rate-limiting. Lower at your own risk.
+const FETCH_DELAY: time::Duration = time::Duration::from_secs(1);
 
 // List of countries that don't return an error on Samurai's news endpoint.
 // Many of these only report empty content listings, though.
@@ -442,7 +443,7 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint, locale
             full_list.push(doc_footer.to_owned());
             break;
         }
-        thread::sleep(time::Duration::from_millis(FETCH_DELAY));
+        thread::sleep(FETCH_DELAY);
     }
 
     let mut file = File::create(format!("samurai/{}/{}/contents", locale.region, locale.language)).unwrap();
@@ -553,7 +554,7 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
             full_list.push(doc_footer.to_owned());
             break;
         }
-        thread::sleep(time::Duration::from_millis(FETCH_DELAY));
+        thread::sleep(FETCH_DELAY);
     }
 
     let mut file = File::create(format!("samurai/{}/{}/directory/{}", locale.region, locale.language, directory_id)).unwrap();
@@ -608,6 +609,8 @@ async fn fetch_resource(client: &reqwest::Client, resource_name: &str, url: &str
     };
 
     File::create(filename)?.write_all(&data)?;
+
+    thread::sleep(FETCH_DELAY);
 
     Ok(())
 }
@@ -748,6 +751,8 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
     let movie_data = get_with_retry_generic(&client.get(&file.movie_url), file.movie_url.clone(), &|response: reqwest::Response| response.bytes()).await?;
     File::create(&filename)?.write_all(&movie_data)?;
 
+    thread::sleep(FETCH_DELAY * 10);
+
     return Ok(());
 }
 
@@ -823,6 +828,8 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
         for movie in title.movies.iter().map(|m| &m.movie).flatten() {
             movie_ids.push(movie.id.clone());
         }
+
+        thread::sleep(FETCH_DELAY);
     }
 
     movie_ids.sort_unstable();
@@ -980,8 +987,6 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
                 fetch_resource(&client, "rating icon", &rating_icon.url).await?;
             }
             // NOTE: There are no demos with associated videos, banners, or thumbnails
-
-            thread::sleep(time::Duration::from_millis(FETCH_DELAY));
         }
 
         let mut movie_set = build_contents_list("movie", movie_set.into_iter());
@@ -1009,7 +1014,6 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
                     fetch_movie_file(&client, &file).await?;
                 }
             }
-            thread::sleep(time::Duration::from_millis(FETCH_DELAY));
         }
     }
 
