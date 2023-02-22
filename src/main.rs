@@ -18,6 +18,35 @@ const shop_id: i32 = 1; // 3DS
 
 const FETCH_DELAY: u64 = 100;
 
+// List of countries that don't return an error on Samurai's news endpoint.
+// Many of these only report empty content listings, though.
+const REGIONS: &[&str] =
+    &[ "AD", "AE", "AG", "AI", "AL", "AN", "AR", "AT", "AU", "AW", "AZ", "BA",
+       "BB", "BE", "BG", "BM", "BO", "BR", "BS", "BW", "BZ", "CA", "CH", "CL",
+       "CN", "CO", "CR", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "EC", "EE",
+       "ER", "ES", "FI", "FR", "GB", "GD", "GF", "GG", "GI", "GP", "GR", "GT",
+       "GY", "HK", "HN", "HR", "HT", "HU", "IE", "IL", "IM", "IN", "IS", "IT",
+       "JE", "JM", "JP", "KN", "KR", "KY", "LC", "LI", "LS", "LT", "LU", "LV",
+       "MC", "ME", "MK", "ML", "MQ", "MR", "MS", "MT", "MX", "MY", "MZ", "NA",
+       "NE", "NI", "NL", "NO", "NZ", "PA", "PE", "PL", "PT", "PY", "RO", "RS",
+       "RU", "SA", "SD", "SE", "SG", "SI", "SK", "SM", "SO", "SR", "SV", "SZ",
+       "TC", "TD", "TR", "TT", "TW", "US", "UY", "VA", "VC", "VE", "VG", "VI",
+       "ZA", "ZM", "ZW",
+];
+
+fn samurai_baseurl(region: &str) -> String {
+    return "https://samurai.ctr.shop.nintendo.net/samurai/ws/".to_owned() + region;
+}
+
+fn ninja_baseurl(region: &str) -> String {
+    return "https://ninja.ctr.shop.nintendo.net/ninja/ws/".to_owned() + region;
+}
+
+struct Locale {
+    region: String,
+    language: String,
+}
+
 async fn get_with_retry<U: reqwest::IntoUrl + Clone>(client: &reqwest::Client, url: U) -> Result<String, reqwest::Error> {
     let mut retries = 0;
     return loop {
@@ -38,8 +67,8 @@ async fn get_with_retry<U: reqwest::IntoUrl + Clone>(client: &reqwest::Client, u
     }
 }
 
-async fn fetch_endpoint(client: &reqwest::Client, endpoint: &str) -> Result<String, reqwest::Error> {
-    let resp = get_with_retry(client, format!("https://samurai.ctr.shop.nintendo.net/samurai/ws/US/{}?shop_id={}&lang=DE", endpoint, shop_id)).await?;
+async fn fetch_endpoint(client: &reqwest::Client, endpoint: &str, locale: &Locale) -> Result<String, reqwest::Error> {
+    let resp = get_with_retry(client, format!("{}/{}?shop_id={}&lang={}", samurai_baseurl(&locale.region), endpoint, shop_id, locale.language)).await?;
     Ok(resp)
 }
 
@@ -283,9 +312,9 @@ enum ContentType {
     Demo,
 }
 
-async fn fetch_directory_list(client: &reqwest::Client) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let resp = get_with_retry(client, format!(  "https://samurai.ctr.shop.nintendo.net/samurai/ws/US/directories?shop_id={}&lang=DE",
-                                    shop_id)).await?;
+async fn fetch_directory_list(client: &reqwest::Client, locale: &Locale) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let resp = get_with_retry(client, format!(  "{}/directories?shop_id={}&lang={}",
+                                    samurai_baseurl(&locale.region), shop_id, &locale.language)).await?;
     let doc: NodeEshopDirectories = quick_xml::de::from_str(&resp).unwrap();
     Ok(doc.directories.directory.into_iter().map(|dir| {
         println!("Directory {}: {}", dir.id, dir.name.replace("\n", " ").replace("<br>", ""));
@@ -293,15 +322,15 @@ async fn fetch_directory_list(client: &reqwest::Client) -> Result<Vec<String>, B
     }).collect())
 }
 
-async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint)
+async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint, locale: &Locale)
     -> Result<Vec<(ContentType, String)>, Box<dyn std::error::Error>> {
     let mut content_list = Vec::new();
 
     let mut offset = 0;
     let mut full_list = Vec::new();
     loop {
-        let resp = get_with_retry(client, format!(  "https://samurai.ctr.shop.nintendo.net/samurai/ws/US/{}?offset={}&shop_id={}&lang=DE",
-                                        endpoint, offset, shop_id)).await?;
+        let resp = get_with_retry(client, format!(  "{}/{}?offset={}&shop_id={}&lang={}",
+                                        samurai_baseurl(&locale.region), endpoint, offset, shop_id, &locale.language)).await?;
 
         let doc: NodeEshop = quick_xml::de::from_str(&resp).unwrap();
 
@@ -340,7 +369,7 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint)
         thread::sleep(time::Duration::from_millis(FETCH_DELAY));
     }
 
-    let mut file = File::create(format!("samurai/contents")).unwrap();
+    let mut file = File::create(format!("samurai/{}/{}/contents", locale.region, locale.language)).unwrap();
     for contents in full_list {
         write!(file, "{}\n", contents)?;
     }
@@ -348,39 +377,39 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint)
     Ok(content_list)
 }
 
-async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_id: &str, content_type: ContentType, omit_ninja: bool) -> Result<T, Box<dyn std::error::Error>> {
+async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_id: &str, content_type: ContentType, locale: &Locale, omit_ninja: bool) -> Result<T, Box<dyn std::error::Error>> {
     let content_type_name = match content_type {
         ContentType::Title => "title",
         ContentType::Movie => "movie",
         ContentType::Demo => "demo",
     };
     println!("Fetching content info for {} {}", content_type_name, content_id);
-    let resp = get_with_retry(client, format!(  "https://samurai.ctr.shop.nintendo.net/samurai/ws/US/{}/{}?shop_id={}&lang=DE",
-                                    content_type_name, content_id, shop_id)).await?;
+    let resp = get_with_retry(client, format!(  "{}/{}/{}?shop_id={}&lang={}",
+                                    samurai_baseurl(&locale.region), content_type_name, content_id, shop_id, &locale.language)).await?;
 
-    fs::create_dir_all(format!("samurai/{}", content_type_name)).unwrap();
-    let mut file = File::create(format!("samurai/{}/{}", content_type_name, content_id)).unwrap();
+    fs::create_dir_all(format!("samurai/{}/{}/{}", locale.region, locale.language, content_type_name)).unwrap();
+    let mut file = File::create(format!("samurai/{}/{}/{}/{}", locale.region, locale.language, content_type_name, content_id)).unwrap();
     write!(file, "{}", resp)?;
 
     if !omit_ninja {
         if content_type == ContentType::Title ||
            content_type == ContentType::Demo {
             println!("  Fetching title id mapping");
-            let ecinfo_resp = get_with_retry(client, format!(   "https://ninja.ctr.shop.nintendo.net/ninja/ws/US/title/{}/ec_info?shop_id={}&lang=DE",
-                                                    content_id, shop_id)).await?;
+            let ecinfo_resp = get_with_retry(client, format!(   "{}/title/{}/ec_info?shop_id={}&lang={}",
+                                                    ninja_baseurl(&locale.region), content_id, shop_id, &locale.language)).await?;
             // Both titles and demos are exposed through the "title" endpoint
-            fs::create_dir_all(format!("ninja/title/{}", content_id)).unwrap();
-            let mut file = File::create(format!("ninja/title/{}/ec_info", content_id)).unwrap();
+            fs::create_dir_all(format!("ninja/{}/{}/title/{}", locale.region, locale.language, content_id)).unwrap();
+            let mut file = File::create(format!("ninja/{}/{}/title/{}/ec_info", locale.region, locale.language, content_id)).unwrap();
             write!(file, "{}", ecinfo_resp)?;
         }
 
         if content_type == ContentType::Title {
             println!("  Fetching price information");
             // NOTE: Just returns "<eshop><online_prices/></eshop>" for arguments that are title ids but not purchasable (e.g. movies)
-            let price_resp = get_with_retry(client, format!("https://ninja.ctr.shop.nintendo.net/ninja/ws/US/titles/online_prices?shop_id={}&lang=DE&title[]={}",
-                                                    shop_id, content_id)).await?;
-            fs::create_dir_all(format!("ninja/titles")).unwrap();
-            let mut file = File::create(format!("ninja/titles/online_prices%3Ftitle%5B%5D%3D{}", content_id)).unwrap();
+            let price_resp = get_with_retry(client, format!("{}/titles/online_prices?shop_id={}&lang={}&title[]={}",
+                                                    ninja_baseurl(&locale.region), shop_id, &locale.language, content_id)).await?;
+            fs::create_dir_all(format!("ninja/{}/{}/titles", locale.region, locale.language)).unwrap();
+            let mut file = File::create(format!("ninja/{}/{}/titles/online_prices%3Ftitle%5B%5D%3D{}", locale.region, locale.language, content_id)).unwrap();
             write!(file, "{}", price_resp)?;
         }
     }
@@ -388,7 +417,7 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
     Ok(quick_xml::de::from_str(&resp).unwrap())
 }
 
-async fn handle_directory_content(client: &reqwest::Client, directory_id: &str) -> Result<DirectoryDocument, Box<dyn std::error::Error>> {
+async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, locale: &Locale) -> Result<DirectoryDocument, Box<dyn std::error::Error>> {
     println!("Fetching content info for directory {}", directory_id);
 
     let mut directory_info = None;
@@ -396,8 +425,8 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str) 
     let mut offset = 0;
     let mut full_list = Vec::new();
     loop {
-        let resp = get_with_retry(client, format!(  "https://samurai.ctr.shop.nintendo.net/samurai/ws/US/directory/{}?offset={}&shop_id={}&lang=DE",
-                                        directory_id, offset, shop_id)).await?;
+        let resp = get_with_retry(client, format!(  "{}/directory/{}?offset={}&shop_id={}&lang={}",
+                                        samurai_baseurl(&locale.region), directory_id, offset, shop_id, &locale.language)).await?;
 
         let doc: DirectoryDocument = quick_xml::de::from_str(&resp).unwrap();
 
@@ -445,8 +474,8 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str) 
         thread::sleep(time::Duration::from_millis(FETCH_DELAY));
     }
 
-    fs::create_dir_all(format!("samurai/directory")).unwrap();
-    let mut file = File::create(format!("samurai/directory/{}", directory_id)).unwrap();
+    fs::create_dir_all(format!("samurai/{}/{}/directory", locale.region, locale.language)).unwrap();
+    let mut file = File::create(format!("samurai/{}/{}/directory/{}", locale.region, locale.language, directory_id)).unwrap();
     for contents in full_list {
         write!(file, "{}\n", contents)?;
     }
@@ -511,6 +540,10 @@ enum EndPoint {
 #[derive(Parser)]
 #[clap(global_setting(clap::AppSettings::DeriveDisplayOrder))]
 struct Args {
+    /// eShop region to fetch from
+    #[clap(long, possible_values=REGIONS)]
+    region: String,
+
     /// API endpoints to fetch (defaults to all)
     #[clap(long, arg_enum)]
     endpoints: Vec<EndPoint>,
@@ -649,16 +682,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let client = client_builder.build()?;
 
-    fs::create_dir_all(format!("samurai")).unwrap();
+    fs::create_dir_all(format!("samurai/{}", args.region)).unwrap();
     fs::create_dir_all(format!("kanzashi")).unwrap();
 
+    // Fetch list of languages first
+    {
+        let data = get_with_retry(&client, format!("{}/{}?shop_id={}", samurai_baseurl(&args.region), EndPoint::Languages, shop_id)).await?;
+        let mut file = File::create(format!("samurai/{}/languages", args.region)).unwrap();
+        write!(file, "{}", data)?;
+    }
+
+    // TODO: Auto-detect languages
+    let locale = Locale { region: args.region, language: "en".to_owned() };
+
+    fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
+
     if args.endpoints.is_empty() {
-        args.endpoints = vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms, EndPoint::Languages]
+        args.endpoints = vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms]
     }
     for endpoint in args.endpoints {
         println!("Fetching endpoint {}", endpoint);
-        let data = fetch_endpoint(&client, &format!("{}", endpoint)).await?;
-        let mut file = File::create(format!("samurai/{}", endpoint)).unwrap();
+        let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
+        let mut file = File::create(format!("samurai/{}/{}/{}", locale.region, locale.language, endpoint)).unwrap();
         write!(file, "{}", data)?;
     }
 
@@ -666,7 +711,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (None, None, None) => {
             let mut title_ids = Vec::new();
             let mut movie_ids = Vec::new();
-            for content in fetch_content_list(&client, EndPoint::Contents).await? {
+            for content in fetch_content_list(&client, EndPoint::Contents, &locale).await? {
                 match content {
                     (ContentType::Title, id) => title_ids.push(id),
                     (ContentType::Movie, id) => movie_ids.push(id),
@@ -675,7 +720,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (ContentType::Demo, _) => panic!("Unexpected demo title in contents list"),
                 }
             }
-            let directory_ids = fetch_directory_list(&client).await?;
+            let directory_ids = fetch_directory_list(&client, &locale).await?;
             (title_ids, movie_ids, directory_ids)
         },
         _ => (args.title_id.into_iter().collect::<Vec<_>>(),
@@ -684,7 +729,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     for directory_id in directory_ids {
-        let directory: DirectoryDocument = handle_directory_content(&client, &directory_id).await?;
+        let directory: DirectoryDocument = handle_directory_content(&client, &directory_id, &locale).await?;
         let directory = directory.directory;
         assert!(directory.contents.is_some());
         for content in directory.contents.unwrap().content {
@@ -703,7 +748,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
 
     for title_id in title_ids {
-        let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, args.omit_ninja_contents).await?;
+        let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, args.omit_ninja_contents).await?;
         let title = content.title;
 
         if let Some(icon_url) = title.icon_url {
@@ -734,10 +779,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if title.aoc_available {
             println!("  Fetching DLC list");
-            let dlc_resp = get_with_retry(&client, format!("https://samurai.ctr.shop.nintendo.net/samurai/ws/US/title/{}/aocs?shop_id={}&lang=DE",
-                                                    title_id, shop_id)).await?;
-            fs::create_dir_all(format!("samurai/title/aocs")).unwrap();
-            let mut file = File::create(format!("samurai/title/aocs/{}", title_id)).unwrap();
+            let dlc_resp = get_with_retry(&client, format!("{}/title/{}/aocs?shop_id={}&lang={}",
+                                                    samurai_baseurl(&locale.region), title_id, shop_id, &locale.language)).await?;
+            fs::create_dir_all(format!("samurai/{}/{}/title/aocs", locale.region, locale.language)).unwrap();
+            let mut file = File::create(format!("samurai/{}/{}/title/aocs/{}", locale.region, locale.language, title_id)).unwrap();
             write!(file, "{}", dlc_resp)?;
         }
 
@@ -765,7 +810,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert!(title.demo_titles.is_some());
             for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
                 // NOTE: There are no demos with associated videos, banners, or thumbnails
-                let demo: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, args.omit_ninja_contents).await?;
+                let demo: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, args.omit_ninja_contents).await?;
                 if let Some(icon_url) = demo.content.demo.icon_url {
                     fetch_resource(&client, "icon", &icon_url).await?;
                 }
@@ -779,7 +824,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for movie_id in movie_ids {
-        let movie_doc: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, args.omit_ninja_contents).await?;
+        let movie_doc: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, args.omit_ninja_contents).await?;
 
         if let Some(banner_url) = movie_doc.movie.banner_url {
             fetch_resource(&client, "banner", &banner_url).await?;

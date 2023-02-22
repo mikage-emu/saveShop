@@ -77,5 +77,4 @@ You can now pass this certificate to saveShop using the `--cert` option.
 ## TODO
 
 * Attempt to discover contents not listed in the `contents` endpoint of Samurai servers
-* Scape regions other than US
 * Improve Wii U eShop scraping
