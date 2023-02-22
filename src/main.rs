@@ -1195,6 +1195,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Use --title/--movie/--directory to restrict what contents to download videos for, or use --fetch-all-videos if you really need everything.");
                 std::process::exit(1);
             }
+
+            // 🤔
+            if fetch_args.fetch_all_videos {
+                println!("Okay, you're serious about creating a *FULL* archive of the eShop.");
+                println!("Please stop to think about the server load this will put on the eShop servers, and reconsider if you *REALLY* need this.");
+                println!("To continue, remove this warning from the source code and recompile saveShop.");
+                std::process::exit(1);
+            }
         },
         _ => {}
     }
