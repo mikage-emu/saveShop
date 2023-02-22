@@ -193,6 +193,9 @@ struct NodeMovies {
 #[derive(Deserialize)]
 struct NodeMovieFile {
     movie_url: String,
+
+    // ""3d" for 3D videos, "2d" otherwise
+    dimension: String,
 }
 
 #[derive(Deserialize)]
@@ -634,11 +637,13 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
     let movie_data = response.bytes().await?;
     File::create(&filename)?.write_all(&movie_data)?;
 
-    // TODO: Strip 3d information?
     println!("  Converting to MP4");
     let out = std::process::Command::new("ffmpeg")
                 .arg("-y") // Overwrite if destination exists
                 .args(["-i", &filename])
+                // Convert alternating frame 3D to side-by-side 3D.
+                // See https://ffmpeg.org/ffmpeg-filters.html#stereo3d for other options
+                .args(if file.dimension == "3d" { vec!["-vf", "stereo3d=al:sbsl"] } else { vec![] })
                 .arg(mp4_filename)
                 .output();
     match out {
