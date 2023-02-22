@@ -1,6 +1,7 @@
 use std::fs;
 use std::fs::File;
 use std::io::Write;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use std::fmt;
@@ -50,23 +51,52 @@ struct Locale {
     language: String,
 }
 
-async fn get_with_retry<U: reqwest::IntoUrl + Clone>(client: &reqwest::Client, url: U) -> Result<String, reqwest::Error> {
-    let mut retries = 0;
+// There are many duplicate resource references across titles/languages/regions,
+// so cache the download urls already processed
+static HTTP_HEADERS_LOG: OnceCell<Mutex<File>> = OnceCell::new();
+static HTTP_HEADERS_SEPARATOR: &str = "--------------------------------------------------\n";
+
+fn log_headers<U: reqwest::IntoUrl + Clone + std::fmt::Display>(url: U, headers: &reqwest::header::HeaderMap<reqwest::header::HeaderValue>) {
+    let json = format!(concat!(
+                "{{\n",
+                "  \"url\": \"{}\",\n",
+                "  \"response_headers\": {{\n",
+                "    {}\n",
+                "  }}\n",
+                "}}\n",
+                "{}"),
+                url,
+                headers.iter().map(|(name, value)| format!("\"{}\": \"{}\"", name, value.to_str().unwrap())).collect::<Vec<_>>().join(",\n    "),
+                HTTP_HEADERS_SEPARATOR);
+    let mut file = HTTP_HEADERS_LOG.get().unwrap().lock().unwrap();
+    write!(file, "{}", json).unwrap();
+    file.sync_data().unwrap();
+}
+
+async fn get_with_retry<U: reqwest::IntoUrl + Clone + std::fmt::Display>(client: &reqwest::Client, url: U) -> Result<String, reqwest::Error> {
+    return get_with_retry_generic(&client.get(url.clone()), url, &|response: reqwest::Response| response.text()).await;
+}
+
+async fn get_with_retry_generic<U, C, F, Output>(request: &reqwest::RequestBuilder, url: U, continuation: C) -> Result<Output, reqwest::Error>
+    where   U: reqwest::IntoUrl + Clone + std::fmt::Display,
+            C: Fn(reqwest::Response) -> F,
+            F: std::future::Future<Output = Result<Output, reqwest::Error>> {
     return loop {
-        let err = match client.get(url.clone()).send().await {
-            Ok(response) => match response.text().await {
-                Ok(response) => break Ok(response),
-                Err(err) => err,
+        let err = match request.try_clone().unwrap().send().await {
+                Ok(response) => {
+                let headers = response.headers().clone();
+                match continuation(response).await {
+                    Ok(response_text) => {
+                        log_headers(url, &headers);
+                        break Ok(response_text)
+                    },
+                    Err(err) => err,
+                }
             }
             Err(err) => err,
         };
-        if retries < 5 {
-            println!("  Got error {}, retrying in 10 seconds", err);
-            thread::sleep(time::Duration::from_secs(10));
-        } else {
-            println!("  Got error {}, giving up", err);
-        }
-        retries += 1;
+        println!("  Got error {}, retrying in 10 seconds", err);
+        thread::sleep(time::Duration::from_secs(10));
     }
 }
 
@@ -429,7 +459,6 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
         ContentType::Movie => "movie",
         ContentType::Demo => "demo",
     };
-    println!("Fetching content info for {} {}", content_type_name, content_id);
     let resp = get_with_retry(client, format!(  "{}/{}/{}?shop_id={}&lang={}",
                                     samurai_baseurl(&locale.region), content_type_name, content_id, shop_id, &locale.language)).await?;
 
@@ -438,9 +467,9 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
     write!(file, "{}", resp)?;
 
     if !omit_ninja {
+        // Fetch mapping from content id to title id
         if content_type == ContentType::Title ||
            content_type == ContentType::Demo {
-            println!("  Fetching title id mapping");
             let ecinfo_resp = get_with_retry(client, format!(   "{}/title/{}/ec_info?shop_id={}&lang={}",
                                                     ninja_baseurl(&locale.region), content_id, shop_id, &locale.language)).await?;
             // Both titles and demos are exposed through the "title" endpoint
@@ -449,8 +478,8 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
             write!(file, "{}", ecinfo_resp)?;
         }
 
+        // Fetch price information
         if content_type == ContentType::Title {
-            println!("  Fetching price information");
             // NOTE: Just returns "<eshop><online_prices/></eshop>" for arguments that are title ids but not purchasable (e.g. movies)
             let price_resp = get_with_retry(client, format!("{}/titles/online_prices?shop_id={}&lang={}&title[]={}",
                                                     ninja_baseurl(&locale.region), shop_id, &locale.language, content_id)).await?;
@@ -464,8 +493,6 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
 }
 
 async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, locale: &Locale) -> Result<DirectoryDocument, Box<dyn std::error::Error>> {
-    println!("Fetching content info for directory {}", directory_id);
-
     fs::create_dir_all(format!("samurai/{}/{}/directory/paginated", locale.region, locale.language)).unwrap();
 
     let mut directory_info = None;
@@ -483,7 +510,7 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
 
         let contents = doc.directory.contents.as_ref().unwrap();
 
-        println!("Directory contents {}-{}, {} total", offset, offset + contents.length.unwrap_or(contents.total) - 1, contents.total);
+        println!("  Directory contents {}-{}, {} total", offset, offset + contents.length.unwrap_or(contents.total) - 1, contents.total);
         assert_eq!(contents.offset.unwrap_or(0), offset);
         assert_eq!(contents.content.len(), contents.length.unwrap_or(contents.total));
         assert!(contents.content.len() <= contents.total);
@@ -493,10 +520,10 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
         for content in &contents.content {
             match &content.title_or_movie {
                 NodeTitleOrMovie::Title(title) => {
-                    println!("  Title {}: {}", title.id, title.name.replace("\n", " ").replace("<br>", ""));
+                    println!("    Title {}: {}", title.id, title.name.replace("\n", " ").replace("<br>", ""));
                 },
                 NodeTitleOrMovie::Movie(movie) => {
-                    println!("  Movie {}: {}", movie.id, movie.name.replace("\n", " ").replace("<br>", ""));
+                    println!("    Movie {}: {}", movie.id, movie.name.replace("\n", " ").replace("<br>", ""));
                 }
             }
         }
@@ -538,45 +565,46 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
 }
 
 // There are many duplicate resource references across titles/languages/regions,
-// so cache the download urls already processed
-static RESOURCE_CACHE: OnceCell<Mutex<HashSet<String>>> = OnceCell::new();
+// so cache the download urls and content sizes
+static RESOURCE_CACHE: OnceCell<Mutex<HashMap<String, u64>>> = OnceCell::new();
 
 async fn fetch_resource(client: &reqwest::Client, resource_name: &str, url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let already_cached: bool = !RESOURCE_CACHE.get().unwrap().lock().unwrap().insert(url.to_string());
-    println!("  Fetching {} from {}{}", resource_name, url, if already_cached { " (cached)" } else { "" });
-    if already_cached {
+    let filename = url_to_filename(url);
+
+    let resource_cache = RESOURCE_CACHE.get().unwrap();
+    let cached_size = *resource_cache.lock().unwrap().get(&url.to_string()).unwrap_or(&0);
+    println!("  Fetching {} from {}{}", resource_name, url, if cached_size != 0 { format!(" ({} KiB, cached)", cached_size / 1024) } else { "".to_string() });
+    if cached_size != 0 && Some(cached_size) == fs::metadata(&filename).map(|m| m.len()).ok() {
         return Ok(());
     }
 
-    let filename = url_to_filename(url);
-
-    let mut retries = 0;
     let data = loop {
         let response = client.get(url).send().await;
         let err = match response {
             Ok(response) => {
+                let headers = response.headers().clone();
                 if let Ok(existing_file) = fs::metadata(&filename) {
                     if Some(existing_file.len()) == response.content_length() {
                         println!("    ... already exists on disk ({} KiB), skipping", response.content_length().unwrap() / 1024);
+                        log_headers(url, &headers);
+                        resource_cache.lock().unwrap().insert(url.to_string(), response.content_length().unwrap());
                         return Ok(());
                     }
                 }
 
                 match response.bytes().await {
-                    Ok(bytes) => break bytes,
+                    Ok(bytes) => {
+                        resource_cache.lock().unwrap().insert(url.to_string(), bytes.len() as u64);
+                        log_headers(url, &headers);
+                        break bytes
+                    },
                     Err(err) => err,
                 }
             },
             Err(err) => err,
         };
-        if retries < 5 {
-            println!("  Got error {}, retrying in 10 seconds", err);
-            thread::sleep(time::Duration::from_secs(10));
-        } else {
-            println!("  Got error {}, giving up", err);
-            return Err(Box::new(err));
-        }
-        retries += 1;
+        println!("  Got error {}, retrying in 10 seconds", err);
+        thread::sleep(time::Duration::from_secs(10));
     };
 
     File::create(filename)?.write_all(&data)?;
@@ -600,6 +628,7 @@ enum EndPoint {
 }
 
 #[derive(clap::Args)]
+#[clap(global_setting(clap::AppSettings::DeriveDisplayOrder))]
 struct FetchMetadataArgs {
     /// Path to ctr-common-1 certificate in PEM format (see Readme)
     #[clap(long, group = "cert-group")]
@@ -638,28 +667,30 @@ enum SubCommand {
     FetchMedia(FetchMediaArgs),
     /// Fetch both metadata and media
     FetchAll(FetchAllArgs),
+    /// Convert moflex video files to mp4
+    ConvertMedia,
 }
 
 #[derive(Parser)]
-#[clap(global_setting(clap::AppSettings::DeriveDisplayOrder))]
 struct Args {
     #[clap(subcommand)]
     command: SubCommand,
 
     /// Only fetch data for the given title
-    #[clap(long = "title")]
+    #[clap(long = "title", value_name = "ID", global = true, display_order = 3)]
     title_id: Option<String>,
 
     /// Only fetch data for the given movie
-    #[clap(long = "movie")]
+    #[clap(long = "movie", value_name = "ID", global = true, display_order = 4)]
     movie_id: Option<String>,
 
     /// Only fetch data for the given directory and its contents
-    #[clap(long = "directory")]
+    #[clap(long = "directory", value_name = "ID", global = true, display_order = 5)]
     directory_id: Option<String>,
 
+    // TODO: Make metadata-specific again...
     /// Comma-delimited list of eShop regions to fetch from
-    #[clap(long, possible_values = REGIONS, required = true, use_delimiter = true)]
+    #[clap(long, possible_values = REGIONS, global = true, use_delimiter = true)]
     regions: Vec<String>,
 }
 
@@ -692,61 +723,44 @@ fn url_to_filename(url: &str) -> String {
 }
 
 async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Result<(), Box<dyn std::error::Error>> {
-    let already_cached: bool = !RESOURCE_CACHE.get().unwrap().lock().unwrap().insert(file.movie_url.to_string());
-    println!("  Fetching movie from {}{}", file.movie_url, if already_cached { " (cached)" } else { "" });
-    if already_cached {
+    let resource_cache = RESOURCE_CACHE.get().unwrap();
+    let cached_size = *resource_cache.lock().unwrap().get(&file.movie_url).unwrap_or(&0);
+    println!("  Fetching movie from {}{}", file.movie_url, if cached_size != 0 { format!(" ({} MiB, cached)", cached_size / 1024 / 1024) } else { "".to_string() });
+    if cached_size != 0 {
         return Ok(());
     }
 
     let filename = format!("kanzashi-movie/{}", file.movie_url.strip_prefix("https://kanzashi-movie-ctr.cdn.nintendo.net/m/").unwrap());
     assert_eq!("moflex", std::path::Path::new(&filename).extension().unwrap());
-    let mp4_filename = std::path::Path::new(&filename).with_extension("mp4");
 
-    let response = client.get(&file.movie_url).send().await?;
-    // Skip if content size matches the moflex on disk *and* if a converted mp4 already exists
+    // Skip if content size matches the moflex on disk
     if let Ok(existing_file) = fs::metadata(&filename) {
-        if std::path::Path::exists(&mp4_filename) && Some(existing_file.len()) == response.content_length() {
-            println!("    ... already exists on disk ({} MiB), skipping", response.content_length().unwrap() / 1024 / 1024);
+        let response = client.get(&file.movie_url).send().await?;
+        let content_length = response.content_length();
+        if Some(existing_file.len()) == content_length {
+            println!("    ... already exists on disk ({} MiB), skipping", content_length.unwrap() / 1024 / 1024);
+            log_headers(&file.movie_url, &response.headers());
+            resource_cache.lock().unwrap().insert(file.movie_url.clone(), content_length.unwrap());
             return Ok(())
         }
     }
 
-    let movie_data = response.bytes().await?;
+    let movie_data = get_with_retry_generic(&client.get(&file.movie_url), file.movie_url.clone(), &|response: reqwest::Response| response.bytes()).await?;
     File::create(&filename)?.write_all(&movie_data)?;
-
-    println!("  Converting to MP4");
-    let out = std::process::Command::new("ffmpeg")
-                .arg("-y") // Overwrite if destination exists
-                .args(["-i", &filename])
-                // Convert alternating frame 3D to side-by-side 3D.
-                // See https://ffmpeg.org/ffmpeg-filters.html#stereo3d for other options
-                .args(if file.dimension == "3d" { vec!["-vf", "stereo3d=al:sbsl"] } else { vec![] })
-                .arg(mp4_filename)
-                .output();
-    match out {
-        Err(e) => match e.kind() {
-            std::io::ErrorKind::NotFound => println!("  WARNING: FFmpeg is not installed, skipping conversion"),
-            _ => panic!("Unknown error while calling ffmpeg")
-        },
-        Ok(out) => if !out.status.success() {
-            println!("  ERROR:");
-            std::io::stderr().write_all(&out.stderr).unwrap();
-            std::process::exit(1);
-        }
-    }
 
     return Ok(());
 }
 
 async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, metadata_args: &FetchMetadataArgs) -> Result<(), Box<dyn std::error::Error>> {
-    for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms] {
+    // NOTE: We're fetching languages *again* here since language names are localized
+    for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms, EndPoint::Languages] {
         println!("Fetching endpoint {}", endpoint);
         let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
         let mut file = File::create(format!("samurai/{}/{}/{}", locale.region, locale.language, endpoint)).unwrap();
         write!(file, "{}", data)?;
     }
 
-    let (mut title_ids, mut movie_ids, directory_ids) = match (&args.title_id, &args.movie_id, &args.directory_id) {
+    let (mut title_ids, mut movie_ids, mut directory_ids) = match (&args.title_id, &args.movie_id, &args.directory_id) {
         (None, None, None) => {
             let mut title_ids = Vec::new();
             let mut movie_ids = Vec::new();
@@ -759,7 +773,7 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
                     (ContentType::Demo, _) => panic!("Unexpected demo title in contents list"),
                 }
             }
-            let directory_ids = fetch_directory_list(&client, &locale).await?;
+            let directory_ids = Vec::<_>::from_iter(fetch_directory_list(&client, &locale).await?.into_iter());
             (title_ids, movie_ids, directory_ids)
         },
         _ => (args.title_id.clone().into_iter().collect::<Vec<_>>(),
@@ -767,7 +781,9 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
             args.directory_id.clone().into_iter().collect::<Vec<_>>())
     };
 
-    for directory_id in directory_ids {
+    directory_ids.sort_unstable();
+    for (index, directory_id) in directory_ids.iter().enumerate() {
+        println!("Fetching metadata for directory {} ({} out of {})", directory_id, index + 1, directory_ids.len());
         let directory: DirectoryDocument = handle_directory_content(&client, &directory_id, &locale).await?;
         let directory = directory.directory;
         assert!(directory.contents.is_some());
@@ -779,7 +795,10 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
         }
     }
 
-    for title_id in title_ids {
+    title_ids.sort_unstable();
+    title_ids.dedup();
+    for (index, title_id) in title_ids.iter().enumerate() {
+        println!("Fetching metadata for title {} ({} out of {})", title_id, index + 1, title_ids.len());
         let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, metadata_args.omit_ninja_contents).await?;
         let title = content.title;
 
@@ -794,13 +813,22 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
 
         if title.demo_available {
             assert!(title.demo_titles.is_some());
-            for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
+            for demo_title in title.demo_titles.as_ref().unwrap().demo_title.iter() {
+                println!("  Fetching metadata for demo {}", demo_title.id);
                 let _: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, metadata_args.omit_ninja_contents).await?;
             }
         }
+
+        // Add referenced movie trailers
+        for movie in title.movies.iter().map(|m| &m.movie).flatten() {
+            movie_ids.push(movie.id.clone());
+        }
     }
 
-    for movie_id in movie_ids {
+    movie_ids.sort_unstable();
+    movie_ids.dedup();
+    for (index, movie_id) in movie_ids.iter().enumerate() {
+        println!("Fetching metadata for movie {} ({} out of {})", movie_id, index + 1, movie_ids.len());
         let _: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, metadata_args.omit_ninja_contents).await?;
     }
 
@@ -824,19 +852,22 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
         let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
 
         let constrained_fetch = args.directory_id.is_some() || args.title_id.is_some() || args.movie_id.is_some();
+        let build_contents_list = |content_name, mut exclude_list: std::vec::IntoIter<String>| {
+            Vec::<_>::from_iter(
+                contained_files_iter(subdir.path().join(content_name))
+                .filter(|d| !constrained_fetch || exclude_list.any(|item| item == d.file_name().to_string_lossy().to_string()))
+                .map(|d| d.path())
+            )
+        };
 
-        let mut title_set = HashSet::<_>::from_iter(args.title_id.clone().into_iter());
-        let mut demo_set = HashSet::new();
-        let mut movie_set = HashSet::<_>::from_iter(args.movie_id.clone().into_iter());
-        let directory_set = HashSet::<_>::from_iter(args.directory_id.clone().into_iter());
+        let mut title_set = Vec::<_>::from_iter(args.title_id.clone().into_iter());
+        let mut movie_set = Vec::<_>::from_iter(args.movie_id.clone().into_iter());
 
-        for directory in contained_files_iter(subdir.path().join("directory")) {
-            if constrained_fetch && !directory_set.contains(&directory.path().to_string_lossy().to_string()) {
-                continue;
-            }
-
-            println!(" Directory {}", &directory.path().display());
-            let parsed_xml: DirectoryDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(directory.path()).unwrap()).unwrap()).unwrap();
+        let mut directory_set = build_contents_list("directory", Vec::<_>::from_iter(args.directory_id.clone().into_iter()).into_iter());
+        directory_set.sort_unstable();
+        for (dir_index, directory) in directory_set.iter().enumerate() {
+            println!(" Directory {} ({} out of {})", &directory.display(), dir_index + 1, directory_set.len());
+            let parsed_xml: DirectoryDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(directory).unwrap()).unwrap()).unwrap();
             let directory = parsed_xml.directory;
             assert!(directory.contents.is_some());
 
@@ -849,20 +880,22 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
 
             // Include titles and movies referenced by this directory
             if constrained_fetch {
-                match &directory.contents.unwrap().content[0].title_or_movie {
-                    NodeTitleOrMovie::Title(title) => { title_set.insert(title.id.clone()); },
-                    NodeTitleOrMovie::Movie(movie) => { movie_set.insert(movie.id.clone()); },
-                };
+                for content in directory.contents.into_iter().map(|c| c.content).flatten() {
+                    match content.title_or_movie {
+                        NodeTitleOrMovie::Title(title) => { title_set.push(title.id); },
+                        NodeTitleOrMovie::Movie(movie) => { movie_set.push(movie.id); },
+                    };
+                }
             }
         }
 
-        for title in contained_files_iter(subdir.path().join("title")) {
-            if constrained_fetch && !title_set.contains(&title.path().to_string_lossy().to_string()) {
-                continue;
-            }
-
-            println!(" Title {}", &title.path().display());
-            let parsed_xml: TitleDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(title.path()).unwrap()).unwrap()).unwrap();
+        let mut demo_set = Vec::new();
+        let mut title_set = build_contents_list("title", title_set.into_iter());
+        title_set.sort_unstable();
+        title_set.dedup();
+        for (title_index, title) in title_set.iter().enumerate() {
+            println!(" Title {} ({} out of {})", &title.display(), title_index + 1, title_set.len());
+            let parsed_xml: TitleDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(title).unwrap()).unwrap()).unwrap();
             let title = parsed_xml.title;
 
             println!("  Name: {}", &title.name.replace("\n", " "));
@@ -894,20 +927,20 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             }
             // TODO: urls, alternate_rating_image_url
 
-            if fetch_args.fetch_videos {
-                fs::create_dir_all(format!("kanzashi-movie")).unwrap();
-                for movie in title.movies.map(|c| c.movie).unwrap_or_default() {
-                    if let Some(banner_url) = movie.banner_url {
-                        fetch_resource(&client, "banner", &banner_url).await?;
-                    }
-                    if let Some(thumbnail_url) = movie.thumbnail_url {
-                        fetch_resource(&client, "thumbnail", &thumbnail_url).await?;
-                    }
+            for movie in title.movies.map(|c| c.movie).unwrap_or_default() {
+                if let Some(banner_url) = movie.banner_url {
+                    fetch_resource(&client, "banner", &banner_url).await?;
+                }
+                if let Some(thumbnail_url) = movie.thumbnail_url {
+                    fetch_resource(&client, "thumbnail", &thumbnail_url).await?;
+                }
 
-                    for rating_icon in icons_from_rating_info(movie.rating_info) {
-                        fetch_resource(&client, "rating icon", &rating_icon.url).await?;
-                    }
+                for rating_icon in icons_from_rating_info(movie.rating_info) {
+                    fetch_resource(&client, "rating icon", &rating_icon.url).await?;
+                }
 
+                if fetch_args.fetch_videos {
+                    fs::create_dir_all(format!("kanzashi-movie")).unwrap();
                     for file in movie.files.file {
                         fetch_movie_file(&client, &file).await?;
                     }
@@ -916,7 +949,7 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
 
             if title.demo_available {
                 for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
-                    demo_set.insert(demo_title.id.clone());
+                    demo_set.push(demo_title.id.clone());
 
                     let demo_path = subdir.path().join("demo").join(&demo_title.id);
                     if !demo_path.exists() {
@@ -931,14 +964,13 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             }
         }
 
-        for demo in contained_files_iter(subdir.path().join("demo")) {
-            if constrained_fetch && !demo_set.contains(&demo.path().to_string_lossy().to_string()) {
-                continue;
-            }
+        let mut demo_set = build_contents_list("demo", demo_set.into_iter());
+        demo_set.sort_unstable();
+        demo_set.dedup();
+        for (demo_index, demo) in demo_set.iter().enumerate() {
+            println!(" Demo {} ({} out of {})", &demo.display(), demo_index + 1, demo_set.len());
 
-            println!(" Demo {}", &demo.path().display());
-
-            let parsed_xml: DemoDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(demo.path()).unwrap()).unwrap()).unwrap();
+            let parsed_xml: DemoDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(demo).unwrap()).unwrap()).unwrap();
             let demo = parsed_xml.content.demo;
 
             if let Some(icon_url) = demo.icon_url {
@@ -952,14 +984,13 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             thread::sleep(time::Duration::from_millis(FETCH_DELAY));
         }
 
-        for movie in contained_files_iter(subdir.path().join("movie")) {
-            if constrained_fetch && !movie_set.contains(&movie.path().to_string_lossy().to_string()) {
-                continue;
-            }
+        let mut movie_set = build_contents_list("movie", movie_set.into_iter());
+        movie_set.sort_unstable();
+        movie_set.dedup();
+        for (movie_index, movie) in movie_set.iter().enumerate() {
+            println!(" Movie {} ({} out of {})", &movie.display(), movie_index + 1, movie_set.len());
 
-            println!(" Movie {}", &movie.path().display());
-
-            let parsed_xml: MovieDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(movie.path()).unwrap()).unwrap()).unwrap();
+            let parsed_xml: MovieDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(movie).unwrap()).unwrap()).unwrap();
             let movie = parsed_xml.movie;
 
             if let Some(banner_url) = movie.banner_url {
@@ -985,10 +1016,127 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
     Ok(())
 }
 
+fn convert_moflex(args: &Args) {
+    let mut movies_2d = HashSet::new();
+    let mut movies_3d = HashSet::new();
+
+    for region in &args.regions {
+        let dir_entries = std::fs::read_dir(format!("samurai/{}", region)).into_iter().flatten().flatten();
+
+        for subdir in dir_entries.filter(|f| f.file_type().unwrap().is_dir()) {
+            println!("Gathering videos for region {} / language {}", region, subdir.file_name().to_str().unwrap());
+
+            let contained_files_iter = |path| {
+                std::fs::read_dir(path)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter(|f| f.file_type().unwrap().is_file())
+            };
+
+            let constrained_fetch = args.directory_id.is_some() || args.title_id.is_some() || args.movie_id.is_some();
+            let build_contents_list = |content_name, mut exclude_list: std::vec::IntoIter<String>| {
+                Vec::<_>::from_iter(
+                    contained_files_iter(subdir.path().join(content_name))
+                    .filter(|d| !constrained_fetch || exclude_list.any(|item| item == d.file_name().to_string_lossy().to_string()))
+                    .map(|d| d.path())
+                )
+            };
+
+            let title_set = Vec::<_>::from_iter(args.title_id.clone().into_iter());
+            let movie_set = Vec::<_>::from_iter(args.movie_id.clone().into_iter());
+
+            let mut title_set = build_contents_list("title", title_set.into_iter());
+            title_set.sort_unstable();
+            title_set.dedup();
+            for title in title_set.iter() {
+                let parsed_xml: TitleDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(title).unwrap()).unwrap()).unwrap();
+                let title = parsed_xml.title;
+                for movie in title.movies.map(|c| c.movie).unwrap_or_default() {
+                    fs::create_dir_all(format!("kanzashi-movie")).unwrap();
+                    for file in movie.files.file {
+                        if file.dimension == "3d" {
+                            movies_3d.insert(file.movie_url);
+                        } else {
+                            movies_2d.insert(file.movie_url);
+                        }
+                    }
+                }
+            }
+
+            let mut movie_set = build_contents_list("movie", movie_set.into_iter());
+            movie_set.sort_unstable();
+            movie_set.dedup();
+            for movie in movie_set.iter() {
+                let parsed_xml: MovieDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(movie).unwrap()).unwrap()).unwrap();
+                let movie = parsed_xml.movie;
+
+                for file in movie.files.file {
+                    if file.dimension == "3d" {
+                        movies_3d.insert(file.movie_url);
+                    } else if file.dimension == "2d" {
+                        movies_2d.insert(file.movie_url);
+                    } else {
+                        panic!("Unknown movie dimension {}", file.dimension);
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(movies_3d.intersection(&movies_2d).collect::<Vec<_>>().is_empty(), "Video referenced both as 2D and 3D");
+
+    let dir_entries = std::fs::read_dir("kanzashi-movie/").into_iter().flatten().flatten();
+    let mut moflex_files = dir_entries.filter(|f| f.file_type().unwrap().is_file() && f.path().as_path().extension() == Some(std::ffi::OsStr::new("moflex"))).collect::<Vec<_>>();
+    moflex_files.sort_unstable_by(|a, b| a.path().cmp(&b.path()));
+    for (index, moflex) in moflex_files.iter().enumerate() {
+        let filename = moflex.file_name();
+        let filename = filename.to_string_lossy();
+
+        println!("Converting {} to MP4 ({} out of {})...", filename, index + 1, moflex_files.len());
+
+        let url = format!("https://kanzashi-movie-ctr.cdn.nintendo.net/m/{}", filename);
+        let is_3d = movies_3d.contains(&url);
+        if !is_3d && !movies_2d.contains(&url) {
+            // Can't determine if it's a 3D video or not in this case
+            panic!("Video file {} not found in metadata", filename);
+        }
+
+        // Skip conversion if an MP4 with non-zero size already exists on disk
+        // NOTE: This may skip over partial files from a previously cancelled run.
+        //       There's no simple way to reliably detect these, so the responsibility is on the user here
+        let mp4_filename = moflex.path().as_path().with_extension("mp4");
+        if let Ok(metadata) = std::fs::metadata(&mp4_filename) {
+            if metadata.len() > 0 {
+                println!("    ... MP4 already exists on disk ({} MiB), skipping", metadata.len() / 1024 / 1024);
+                continue;
+            }
+        }
+
+        let out = std::process::Command::new("ffmpeg")
+                    .arg("-y") // Overwrite if destination exists
+                    .args(["-i", &moflex.path().as_path().to_string_lossy()])
+                    // Convert alternating frame 3D to side-by-side 3D.
+                    // See https://ffmpeg.org/ffmpeg-filters.html#stereo3d for other options
+                    .args(if is_3d { vec!["-vf", "stereo3d=al:sbsl"] } else { vec![] })
+                    .arg(mp4_filename)
+                    .output();
+        match out {
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::NotFound => panic!("  ERROR: FFmpeg is not installed"),
+                _ => panic!("Unknown error while calling ffmpeg")
+            },
+            Ok(out) => if !out.status.success() {
+                println!("  ERROR:");
+                std::io::stderr().write_all(&out.stderr).unwrap();
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    RESOURCE_CACHE.get_or_init(|| Mutex::new(HashSet::new()));
-
     let mut args = Args::parse();
 
     let ssl_id = match args.command {
@@ -1010,6 +1158,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => None
     };
+
+    RESOURCE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    {
+        let cache = fs::read_to_string("http_log");
+        if let Ok(cache) = cache {
+            let mut resource_cache = RESOURCE_CACHE.get().unwrap().lock().unwrap();
+            for entry in cache.split_terminator(HTTP_HEADERS_SEPARATOR) {
+                let entry: serde_json::Value = serde_json::from_str(&entry)?;
+                if let Some(num_bytes) = entry["response_headers"]["content-length"].as_str() {
+                    let num_bytes: u64 = num_bytes.parse().unwrap();
+                    resource_cache.insert(entry["url"].as_str().unwrap().to_string(), num_bytes);
+                }
+            }
+        }
+    }
+    HTTP_HEADERS_LOG.get_or_init(|| Mutex::new(std::fs::OpenOptions::new().create(true).append(true).open("http_log").unwrap()));
 
     // Check if we should prompt for --fetch-all-videos to be added
     match args.command {
@@ -1044,7 +1209,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(format!("kanzashi-movie")).unwrap();
 
     for region in &args.regions {
-        println!("Processing region {}", region);
+        if !matches!(args.command, SubCommand::FetchMetadata(_)) && !matches!(args.command, SubCommand::FetchAll(_)) {
+            break;
+        }
+
+        println!("\nProcessing region {}", region);
         fs::create_dir_all(format!("samurai/{}", region)).unwrap();
 
         // Fetch list of languages first
@@ -1060,7 +1229,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
 
-            println!("Supported languages for region {}:", &region);
+            println!("Supported languages:");
             for NodeLanguage { name, iso_code } in &parsed_xml.languages.language {
                 println!("  {} ({})", iso_code, name);
             }
@@ -1093,6 +1262,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         _ => {},
+    }
+
+    if matches!(args.command, SubCommand::ConvertMedia) {
+        convert_moflex(&args);
     }
 
     Ok(())

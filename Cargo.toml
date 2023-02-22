@@ -9,4 +9,5 @@ once_cell = { version = "1.17.0" }
 quick-xml = { version = "0.27", features = ["serialize"] }
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0.93" }
 tokio = { version = "1", features = ["full"] }
