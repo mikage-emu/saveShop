@@ -359,9 +359,15 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint, locale
 
     let mut offset = 0;
     let mut full_list = Vec::new();
+
+    fs::create_dir_all(format!("samurai/{}/{}/paginated/", locale.region, locale.language)).unwrap();
+
     loop {
         let resp = get_with_retry(client, format!(  "{}/{}?offset={}&shop_id={}&lang={}",
                                         samurai_baseurl(&locale.region), endpoint, offset, shop_id, &locale.language)).await?;
+
+        let mut file = File::create(format!("samurai/{}/{}/paginated/contents%3Foffset%3D{}", locale.region, locale.language, offset)).unwrap();
+        write!(file, "{}", &resp)?;
 
         let doc: NodeEshop = quick_xml::de::from_str(&resp).unwrap();
 
@@ -460,6 +466,8 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
 async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, locale: &Locale) -> Result<DirectoryDocument, Box<dyn std::error::Error>> {
     println!("Fetching content info for directory {}", directory_id);
 
+    fs::create_dir_all(format!("samurai/{}/{}/directory/paginated", locale.region, locale.language)).unwrap();
+
     let mut directory_info = None;
 
     let mut offset = 0;
@@ -467,6 +475,9 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
     loop {
         let resp = get_with_retry(client, format!(  "{}/directory/{}?offset={}&shop_id={}&lang={}",
                                         samurai_baseurl(&locale.region), directory_id, offset, shop_id, &locale.language)).await?;
+
+        let mut file = File::create(format!("samurai/{}/{}/directory/paginated/{}%3Foffset%3D{}", locale.region, locale.language, directory_id, offset)).unwrap();
+        write!(file, "{}", &resp)?;
 
         let doc: DirectoryDocument = quick_xml::de::from_str(&resp).unwrap();
 
@@ -518,7 +529,6 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
         thread::sleep(time::Duration::from_millis(FETCH_DELAY));
     }
 
-    fs::create_dir_all(format!("samurai/{}/{}/directory", locale.region, locale.language)).unwrap();
     let mut file = File::create(format!("samurai/{}/{}/directory/{}", locale.region, locale.language, directory_id)).unwrap();
     for contents in full_list {
         write!(file, "{}\n", contents)?;
