@@ -264,6 +264,22 @@ struct DirectoryDocument {
 }
 
 #[derive(Deserialize)]
+struct NodeLanguage {
+    iso_code: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct NodeLanguages {
+    language: Vec<NodeLanguage>,
+}
+
+#[derive(Deserialize)]
+struct LanguagesDocument {
+    languages: NodeLanguages,
+}
+
+#[derive(Deserialize)]
 struct NodeContent {
     #[serde(rename = "@index")]
     index: String,
@@ -681,160 +697,176 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(format!("kanzashi")).unwrap();
 
     // Fetch list of languages first
-    {
+    let languages: Vec<_> = {
         let data = get_with_retry(&client, format!("{}/{}?shop_id={}", samurai_baseurl(&args.region), EndPoint::Languages, shop_id)).await?;
         let mut file = File::create(format!("samurai/{}/languages", args.region)).unwrap();
         write!(file, "{}", data)?;
-    }
 
-    // TODO: Auto-detect languages
-    let locale = Locale { region: args.region, language: "en".to_owned() };
+        let parsed_xml: LanguagesDocument = quick_xml::de::from_str(&data).unwrap();
 
-    fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
+        if parsed_xml.languages.language.is_empty() {
+            println!("Could not find any supported languages for region {}", &args.region);
+            std::process::exit(1);
+        }
 
-    for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms] {
-        println!("Fetching endpoint {}", endpoint);
-        let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
-        let mut file = File::create(format!("samurai/{}/{}/{}", locale.region, locale.language, endpoint)).unwrap();
-        write!(file, "{}", data)?;
-    }
+        println!("Supported languages for region {}:", &args.region);
+        for NodeLanguage { name, iso_code } in &parsed_xml.languages.language {
+            println!("  {} ({})", iso_code, name);
+        }
 
-    let (mut title_ids, mut movie_ids, directory_ids) = match (&args.title_id, &args.movie_id, &args.directory_id) {
-        (None, None, None) => {
-            let mut title_ids = Vec::new();
-            let mut movie_ids = Vec::new();
-            for content in fetch_content_list(&client, EndPoint::Contents, &locale).await? {
-                match content {
-                    (ContentType::Title, id) => title_ids.push(id),
-                    (ContentType::Movie, id) => movie_ids.push(id),
-
-                    // "contents" endpoint only contains titles and movies
-                    (ContentType::Demo, _) => panic!("Unexpected demo title in contents list"),
-                }
-            }
-            let directory_ids = fetch_directory_list(&client, &locale).await?;
-            (title_ids, movie_ids, directory_ids)
-        },
-        _ => (args.title_id.into_iter().collect::<Vec<_>>(),
-              args.movie_id.into_iter().collect::<Vec<_>>(),
-              args.directory_id.into_iter().collect::<Vec<_>>())
+        parsed_xml.languages.language.into_iter().map(|lang| lang.iso_code).collect()
     };
 
-    for directory_id in directory_ids {
-        let directory: DirectoryDocument = handle_directory_content(&client, &directory_id, &locale).await?;
-        let directory = directory.directory;
-        assert!(directory.contents.is_some());
-        for content in directory.contents.unwrap().content {
-            match content.title_or_movie {
-                NodeTitleOrMovie::Title(title) => if !title_ids.contains(&title.id) { title_ids.push(title.id) },
-                NodeTitleOrMovie::Movie(movie) => if !movie_ids.contains(&movie.id) { movie_ids.push(movie.id) },
+    for language in languages {
+        let locale = Locale { region: args.region.clone(), language: language.to_owned() };
+
+        fs::create_dir_all(format!("samurai/{}/{}", locale.region, locale.language)).unwrap();
+
+        for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::Platforms] {
+            println!("Fetching endpoint {}", endpoint);
+            let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
+            let mut file = File::create(format!("samurai/{}/{}/{}", locale.region, locale.language, endpoint)).unwrap();
+            write!(file, "{}", data)?;
+        }
+
+        let (mut title_ids, mut movie_ids, directory_ids) = match (&args.title_id, &args.movie_id, &args.directory_id) {
+            (None, None, None) => {
+                let mut title_ids = Vec::new();
+                let mut movie_ids = Vec::new();
+                for content in fetch_content_list(&client, EndPoint::Contents, &locale).await? {
+                    match content {
+                        (ContentType::Title, id) => title_ids.push(id),
+                        (ContentType::Movie, id) => movie_ids.push(id),
+
+                        // "contents" endpoint only contains titles and movies
+                        (ContentType::Demo, _) => panic!("Unexpected demo title in contents list"),
+                    }
+                }
+                let directory_ids = fetch_directory_list(&client, &locale).await?;
+                (title_ids, movie_ids, directory_ids)
+            },
+            _ => (args.title_id.clone().into_iter().collect::<Vec<_>>(),
+                args.movie_id.clone().into_iter().collect::<Vec<_>>(),
+                args.directory_id.clone().into_iter().collect::<Vec<_>>())
+        };
+
+        for directory_id in directory_ids {
+            let directory: DirectoryDocument = handle_directory_content(&client, &directory_id, &locale).await?;
+            let directory = directory.directory;
+            assert!(directory.contents.is_some());
+            for content in directory.contents.unwrap().content {
+                match content.title_or_movie {
+                    NodeTitleOrMovie::Title(title) => if !title_ids.contains(&title.id) { title_ids.push(title.id) },
+                    NodeTitleOrMovie::Movie(movie) => if !movie_ids.contains(&movie.id) { movie_ids.push(movie.id) },
+                }
             }
-        }
 
-        if let Some(icon_url) = directory.icon_url {
-            fetch_resource(&client, "icon", &icon_url).await?;
-        }
-        fetch_resource(&client, "banner", &directory.banner_url).await?;
-    }
-
-    let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
-
-    for title_id in title_ids {
-        let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, args.omit_ninja_contents).await?;
-        let title = content.title;
-
-        if let Some(icon_url) = title.icon_url {
-            fetch_resource(&client, "icon", &icon_url).await?;
-        }
-        if let Some(banner_url) = title.banner_url {
-            fetch_resource(&client, "banner", &banner_url).await?;
-        }
-        for thumbnail in title.thumbnails.thumbnail {
-            fetch_resource(&client, "thumbnail", &thumbnail.url).await?;
-        }
-        for rating_icon in icons_from_rating_info(title.rating_info) {
-            fetch_resource(&client, "rating icon", &rating_icon.url).await?;
-        }
-        for screenshot in title.screenshots.screenshot {
-            for image_url in screenshot.image_url {
-                let resource_name = match image_url.screen {
-                    None => "screenshot".to_string(),
-                    Some(screen) => format!("{} screenshot", &screen),
-                };
-                fetch_resource(&client, &resource_name, &image_url.url).await?;
+            if let Some(icon_url) = directory.icon_url {
+                fetch_resource(&client, "icon", &icon_url).await?;
             }
-            for thumbnail in screenshot.thumbnail_url {
+            fetch_resource(&client, "banner", &directory.banner_url).await?;
+        }
+
+        let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
+
+        for title_id in title_ids {
+            let content: TitleDocument = handle_content(&client, &title_id, ContentType::Title, &locale, args.omit_ninja_contents).await?;
+            let title = content.title;
+
+            if let Some(icon_url) = title.icon_url {
+                fetch_resource(&client, "icon", &icon_url).await?;
+            }
+            if let Some(banner_url) = title.banner_url {
+                fetch_resource(&client, "banner", &banner_url).await?;
+            }
+            for thumbnail in title.thumbnails.thumbnail {
                 fetch_resource(&client, "thumbnail", &thumbnail.url).await?;
             }
+            for rating_icon in icons_from_rating_info(title.rating_info) {
+                fetch_resource(&client, "rating icon", &rating_icon.url).await?;
+            }
+            for screenshot in title.screenshots.screenshot {
+                for image_url in screenshot.image_url {
+                    let resource_name = match image_url.screen {
+                        None => "screenshot".to_string(),
+                        Some(screen) => format!("{} screenshot", &screen),
+                    };
+                    fetch_resource(&client, &resource_name, &image_url.url).await?;
+                }
+                for thumbnail in screenshot.thumbnail_url {
+                    fetch_resource(&client, "thumbnail", &thumbnail.url).await?;
+                }
+            }
+            // TODO: urls, alternate_rating_image_url
+
+            if title.aoc_available {
+                println!("  Fetching DLC list");
+                let dlc_resp = get_with_retry(&client, format!("{}/title/{}/aocs?shop_id={}&lang={}",
+                                                        samurai_baseurl(&locale.region), title_id, shop_id, &locale.language)).await?;
+                fs::create_dir_all(format!("samurai/{}/{}/title/aocs", locale.region, locale.language)).unwrap();
+                let mut file = File::create(format!("samurai/{}/{}/title/aocs/{}", locale.region, locale.language, title_id)).unwrap();
+                write!(file, "{}", dlc_resp)?;
+            }
+
+            if args.fetch_videos {
+                fs::create_dir_all(format!("kanzashi-movie")).unwrap();
+                for movie in title.movies.map(|c| c.movie).unwrap_or_default() {
+                    if let Some(banner_url) = movie.banner_url {
+                        fetch_resource(&client, "banner", &banner_url).await?;
+                    }
+                    if let Some(thumbnail_url) = movie.thumbnail_url {
+                        fetch_resource(&client, "thumbnail", &thumbnail_url).await?;
+                    }
+
+                    for rating_icon in icons_from_rating_info(movie.rating_info) {
+                        fetch_resource(&client, "rating icon", &rating_icon.url).await?;
+                    }
+
+                    for file in movie.files.file {
+                        fetch_movie_file(&client, &file).await?;
+                    }
+                }
+                // TODO: Resources? Banner, thumbnail
+            }
+
+            if title.demo_available {
+                assert!(title.demo_titles.is_some());
+                for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
+                    // NOTE: There are no demos with associated videos, banners, or thumbnails
+                    let demo: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, args.omit_ninja_contents).await?;
+                    if let Some(icon_url) = demo.content.demo.icon_url {
+                        fetch_resource(&client, "icon", &icon_url).await?;
+                    }
+                    for rating_icon in icons_from_rating_info(demo.content.demo.rating_info) {
+                        fetch_resource(&client, "rating icon", &rating_icon.url).await?;
+                    }
+                }
+            }
+
+            thread::sleep(time::Duration::from_millis(FETCH_DELAY));
         }
-        // TODO: urls, alternate_rating_image_url
 
-        if title.aoc_available {
-            println!("  Fetching DLC list");
-            let dlc_resp = get_with_retry(&client, format!("{}/title/{}/aocs?shop_id={}&lang={}",
-                                                    samurai_baseurl(&locale.region), title_id, shop_id, &locale.language)).await?;
-            fs::create_dir_all(format!("samurai/{}/{}/title/aocs", locale.region, locale.language)).unwrap();
-            let mut file = File::create(format!("samurai/{}/{}/title/aocs/{}", locale.region, locale.language, title_id)).unwrap();
-            write!(file, "{}", dlc_resp)?;
-        }
+        for movie_id in movie_ids {
+            let movie_doc: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, args.omit_ninja_contents).await?;
 
-        if args.fetch_videos {
-            fs::create_dir_all(format!("kanzashi-movie")).unwrap();
-            for movie in title.movies.map(|c| c.movie).unwrap_or_default() {
-                if let Some(banner_url) = movie.banner_url {
-                    fetch_resource(&client, "banner", &banner_url).await?;
-                }
-                if let Some(thumbnail_url) = movie.thumbnail_url {
-                    fetch_resource(&client, "thumbnail", &thumbnail_url).await?;
-                }
+            if let Some(banner_url) = movie_doc.movie.banner_url {
+                fetch_resource(&client, "banner", &banner_url).await?;
+            }
+            if let Some(thumbnail_url) = movie_doc.movie.thumbnail_url {
+                fetch_resource(&client, "thumbnail", &thumbnail_url).await?;
+            }
+            for rating_icon in icons_from_rating_info(movie_doc.movie.rating_info) {
+                fetch_resource(&client, "rating icon", &rating_icon.url).await?;
+            }
+            // TODO: urls, alternate_rating_image_url
 
-                for rating_icon in icons_from_rating_info(movie.rating_info) {
-                    fetch_resource(&client, "rating icon", &rating_icon.url).await?;
-                }
-
-                for file in movie.files.file {
+            if args.fetch_videos {
+                for file in movie_doc.movie.files.file {
                     fetch_movie_file(&client, &file).await?;
                 }
             }
+            thread::sleep(time::Duration::from_millis(FETCH_DELAY));
         }
-
-        if title.demo_available {
-            assert!(title.demo_titles.is_some());
-            for demo_title in &title.demo_titles.as_ref().unwrap().demo_title {
-                // NOTE: There are no demos with associated videos, banners, or thumbnails
-                let demo: DemoDocument = handle_content(&client, &demo_title.id, ContentType::Demo, &locale, args.omit_ninja_contents).await?;
-                if let Some(icon_url) = demo.content.demo.icon_url {
-                    fetch_resource(&client, "icon", &icon_url).await?;
-                }
-                for rating_icon in icons_from_rating_info(demo.content.demo.rating_info) {
-                    fetch_resource(&client, "rating icon", &rating_icon.url).await?;
-                }
-            }
-        }
-
-        thread::sleep(time::Duration::from_millis(FETCH_DELAY));
-    }
-
-    for movie_id in movie_ids {
-        let movie_doc: MovieDocument = handle_content(&client, &movie_id, ContentType::Movie, &locale, args.omit_ninja_contents).await?;
-
-        if let Some(banner_url) = movie_doc.movie.banner_url {
-            fetch_resource(&client, "banner", &banner_url).await?;
-        }
-        if let Some(thumbnail_url) = movie_doc.movie.thumbnail_url {
-            fetch_resource(&client, "thumbnail", &thumbnail_url).await?;
-        }
-        for rating_icon in icons_from_rating_info(movie_doc.movie.rating_info) {
-            fetch_resource(&client, "rating icon", &rating_icon.url).await?;
-        }
-        // TODO: urls, alternate_rating_image_url
-
-        if args.fetch_videos {
-            for file in movie_doc.movie.files.file {
-                fetch_movie_file(&client, &file).await?;
-            }
-        }
-        thread::sleep(time::Duration::from_millis(FETCH_DELAY));
     }
 
     Ok(())
