@@ -976,10 +976,10 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
         let icons_from_rating_info = |rating_info: Option<NodeRatingInfo>| if rating_info.is_some() { rating_info.unwrap().rating.icons.icon } else { Vec::new() };
 
         let constrained_fetch = args.directory_id.is_some() || args.title_id.is_some() || args.movie_id.is_some();
-        let build_contents_list = |content_name, mut exclude_list: std::vec::IntoIter<String>| {
+        let build_contents_list = |content_name, exclude_list: Vec<_>| {
             Vec::<_>::from_iter(
                 contained_files_iter(subdir.path().join(content_name))
-                .filter(|d| !constrained_fetch || exclude_list.any(|item| item == d.file_name().to_string_lossy().to_string()))
+                .filter(|d| !constrained_fetch || exclude_list.iter().any(|item| *item == d.file_name().to_string_lossy().to_string()))
                 .map(|d| d.path())
             )
         };
@@ -987,7 +987,7 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
         let mut title_set = Vec::<_>::from_iter(args.title_id.clone().into_iter());
         let mut movie_set = Vec::<_>::from_iter(args.movie_id.clone().into_iter());
 
-        let mut directory_set = build_contents_list("directory", Vec::<_>::from_iter(args.directory_id.clone().into_iter()).into_iter());
+        let mut directory_set = build_contents_list("directory", Vec::<_>::from_iter(args.directory_id.clone().into_iter()));
         directory_set.sort_unstable();
         for (dir_index, directory) in directory_set.iter().enumerate() {
             println!(" Directory {} ({} out of {})", &directory.display(), dir_index + 1, directory_set.len());
@@ -1014,7 +1014,7 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
         }
 
         let mut demo_set = Vec::new();
-        let mut title_set = build_contents_list("title", title_set.into_iter());
+        let mut title_set = build_contents_list("title", title_set);
         title_set.sort_unstable();
         title_set.dedup();
         for (title_index, title) in title_set.iter().enumerate() {
@@ -1088,7 +1088,7 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             }
         }
 
-        let mut demo_set = build_contents_list("demo", demo_set.into_iter());
+        let mut demo_set = build_contents_list("demo", demo_set);
         demo_set.sort_unstable();
         demo_set.dedup();
         for (demo_index, demo) in demo_set.iter().enumerate() {
@@ -1106,7 +1106,7 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             // NOTE: There are no demos with associated videos, banners, or thumbnails
         }
 
-        let mut movie_set = build_contents_list("movie", movie_set.into_iter());
+        let mut movie_set = build_contents_list("movie", movie_set);
         movie_set.sort_unstable();
         movie_set.dedup();
         for (movie_index, movie) in movie_set.iter().enumerate() {
@@ -1156,10 +1156,10 @@ fn convert_moflex(args: &Args) {
             };
 
             let constrained_fetch = args.directory_id.is_some() || args.title_id.is_some() || args.movie_id.is_some();
-            let build_contents_list = |content_name, mut exclude_list: std::vec::IntoIter<String>| {
+            let build_contents_list = |content_name, exclude_list: Vec<_>| {
                 Vec::<_>::from_iter(
                     contained_files_iter(subdir.path().join(content_name))
-                    .filter(|d| !constrained_fetch || exclude_list.any(|item| item == d.file_name().to_string_lossy().to_string()))
+                    .filter(|d| !constrained_fetch || exclude_list.iter().any(|item| *item == d.file_name().to_string_lossy().to_string()))
                     .map(|d| d.path())
                 )
             };
@@ -1167,7 +1167,7 @@ fn convert_moflex(args: &Args) {
             let title_set = Vec::<_>::from_iter(args.title_id.clone().into_iter());
             let movie_set = Vec::<_>::from_iter(args.movie_id.clone().into_iter());
 
-            let mut title_set = build_contents_list("title", title_set.into_iter());
+            let mut title_set = build_contents_list("title", title_set);
             title_set.sort_unstable();
             title_set.dedup();
             for title in title_set.iter() {
@@ -1185,7 +1185,7 @@ fn convert_moflex(args: &Args) {
                 }
             }
 
-            let mut movie_set = build_contents_list("movie", movie_set.into_iter());
+            let mut movie_set = build_contents_list("movie", movie_set);
             movie_set.sort_unstable();
             movie_set.dedup();
             for movie in movie_set.iter() {
