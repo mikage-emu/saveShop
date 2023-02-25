@@ -1158,7 +1158,12 @@ fn convert_moflex(args: &Args) {
                         .filter(|f| f.file_type().unwrap().is_file())
             };
 
-            let constrained_fetch = args.directory_id.is_some() || args.title_id.is_some() || args.movie_id.is_some();
+            if args.directory_id.is_some() {
+                println!("Cannot constrain media conversion by directory id. Use --title or --movie instead.");
+                std::process::exit(1);
+            }
+
+            let constrained_fetch = args.title_id.is_some() || args.movie_id.is_some();
             let build_contents_list = |content_name, exclude_list: Vec<_>| {
                 Vec::<_>::from_iter(
                     contained_files_iter(subdir.path().join(content_name))
@@ -1177,7 +1182,6 @@ fn convert_moflex(args: &Args) {
                 let parsed_xml: TitleDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(title).unwrap()).unwrap()).unwrap();
                 let title = parsed_xml.title;
                 for movie in title.movies.map(|c| c.movie).unwrap_or_default() {
-                    fs::create_dir_all(format!("kanzashi-movie")).unwrap();
                     for file in movie.files.file {
                         if file.dimension == "3d" {
                             movies_3d.insert(file.movie_url);
@@ -1194,7 +1198,6 @@ fn convert_moflex(args: &Args) {
             for movie in movie_set.iter() {
                 let parsed_xml: MovieDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(movie).unwrap()).unwrap()).unwrap();
                 let movie = parsed_xml.movie;
-
                 for file in movie.files.file {
                     if file.dimension == "3d" {
                         movies_3d.insert(file.movie_url);
