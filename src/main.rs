@@ -796,7 +796,6 @@ struct Args {
     #[clap(long = "directory", value_name = "ID", global = true, display_order = 5)]
     directory_id: Option<String>,
 
-    // TODO: Make metadata-specific again...
     /// Comma-delimited list of eShop regions to fetch from
     #[clap(long, possible_values = REGIONS, global = true, use_delimiter = true)]
     regions: Vec<String>,
@@ -1259,6 +1258,12 @@ fn convert_moflex(args: &Args) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
+
+    if args.regions.is_empty() {
+        use clap::CommandFactory;
+        let mut cmd = Args::command();
+        cmd.error(clap::ErrorKind::MissingRequiredArgument, "The required argument --regions was not provided").exit();
+    }
 
     let ssl_id = match args.command {
         SubCommand::FetchMetadata(ref args)
