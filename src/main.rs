@@ -832,6 +832,10 @@ fn url_to_filename(url: &str) -> String {
     }
 }
 
+fn movie_url_to_filename(url: &str) -> String {
+    format!("kanzashi-movie/{}", url.strip_prefix("https://kanzashi-movie-ctr.cdn.nintendo.net/m/").unwrap())
+}
+
 async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Result<(), Box<dyn std::error::Error>> {
     let resource_cache = RESOURCE_CACHE.get().unwrap();
     let cached_size = *resource_cache.lock().unwrap().get(&file.movie_url).unwrap_or(&0);
@@ -840,7 +844,7 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
         return Ok(());
     }
 
-    let filename = format!("kanzashi-movie/{}", file.movie_url.strip_prefix("https://kanzashi-movie-ctr.cdn.nintendo.net/m/").unwrap());
+    let filename = movie_url_to_filename(&file.movie_url);
     assert_eq!("moflex", std::path::Path::new(&filename).extension().unwrap());
 
     // Skip if content size matches the moflex on disk
@@ -1144,7 +1148,7 @@ fn convert_moflex(args: &Args) {
         let dir_entries = std::fs::read_dir(format!("samurai/{}", region)).into_iter().flatten().flatten();
 
         for subdir in dir_entries.filter(|f| f.file_type().unwrap().is_dir()) {
-            println!("Gathering videos for region {} / language {}", region, subdir.file_name().to_str().unwrap());
+            println!("Gathering video metadata for region {} / language {}", region, subdir.file_name().to_str().unwrap());
 
             let contained_files_iter = |path| {
                 std::fs::read_dir(path)
@@ -1206,26 +1210,29 @@ fn convert_moflex(args: &Args) {
 
     assert!(movies_3d.intersection(&movies_2d).collect::<Vec<_>>().is_empty(), "Video referenced both as 2D and 3D");
 
-    let dir_entries = std::fs::read_dir("kanzashi-movie/").into_iter().flatten().flatten();
-    let mut moflex_files = dir_entries.filter(|f| f.file_type().unwrap().is_file() && f.path().as_path().extension() == Some(std::ffi::OsStr::new("moflex"))).collect::<Vec<_>>();
-    moflex_files.sort_unstable_by(|a, b| a.path().cmp(&b.path()));
-    for (index, moflex) in moflex_files.iter().enumerate() {
-        let filename = moflex.file_name();
+    let mut all_videos = movies_2d.iter().collect::<Vec<_>>();
+    all_videos.append(&mut (movies_3d.iter().collect::<Vec<_>>()));
+    all_videos.sort_unstable();
+
+    if all_videos.is_empty() {
+        println!("No video metadata found for the given regions");
+        std::process::exit(1);
+    }
+
+    for (index, url) in all_videos.iter().enumerate() {
+        let moflex = std::path::Path::new(&movie_url_to_filename(*url)).to_owned();
+        let filename = moflex.file_name().unwrap();
         let filename = filename.to_string_lossy();
 
-        println!("Converting {} to MP4 ({} out of {})...", filename, index + 1, moflex_files.len());
+        println!("Converting {} to MP4 ({} out of {})...", filename, index + 1, all_videos.len());
 
-        let url = format!("https://kanzashi-movie-ctr.cdn.nintendo.net/m/{}", filename);
-        let is_3d = movies_3d.contains(&url);
-        if !is_3d && !movies_2d.contains(&url) {
-            // Can't determine if it's a 3D video or not in this case
-            panic!("Video file {} not found in metadata", filename);
-        }
+        let is_3d = movies_3d.contains(*url);
+        assert!(is_3d || movies_2d.contains(*url));
 
         // Skip conversion if an MP4 with non-zero size already exists on disk
         // NOTE: This may skip over partial files from a previously cancelled run.
         //       There's no simple way to reliably detect these, so the responsibility is on the user here
-        let mp4_filename = moflex.path().as_path().with_extension("mp4");
+        let mp4_filename = moflex.with_extension("mp4");
         if let Ok(metadata) = std::fs::metadata(&mp4_filename) {
             if metadata.len() > 0 {
                 println!("    ... MP4 already exists on disk ({} MiB), skipping", metadata.len() / 1024 / 1024);
@@ -1235,7 +1242,7 @@ fn convert_moflex(args: &Args) {
 
         let out = std::process::Command::new("ffmpeg")
                     .arg("-y") // Overwrite if destination exists
-                    .args(["-i", &moflex.path().as_path().to_string_lossy()])
+                    .args(["-i", &moflex.to_string_lossy()])
                     // Convert alternating frame 3D to side-by-side 3D.
                     // See https://ffmpeg.org/ffmpeg-filters.html#stereo3d for other options
                     .args(if is_3d { vec!["-vf", "stereo3d=al:sbsl"] } else { vec![] })
