@@ -767,6 +767,13 @@ struct FetchAllArgs {
     media: FetchMediaArgs,
 }
 
+#[derive(clap::Args)]
+struct ConvertMediaArgs {
+    /// Only convert a specific moflex file
+    #[clap(long, value_name = "PATH")]
+    filename: Option<String>
+}
+
 #[derive(clap::Subcommand)]
 enum SubCommand {
     /// Fetch general title information
@@ -776,7 +783,7 @@ enum SubCommand {
     /// Fetch both metadata and media
     FetchAll(FetchAllArgs),
     /// Convert moflex video files to mp4
-    ConvertMedia,
+    ConvertMedia(ConvertMediaArgs),
 }
 
 #[derive(Parser)]
@@ -1217,6 +1224,22 @@ fn convert_moflex(args: &Args) {
     all_videos.append(&mut (movies_3d.iter().collect::<Vec<_>>()));
     all_videos.sort_unstable();
 
+    if let SubCommand::ConvertMedia(ConvertMediaArgs { filename: Some(filename) }) = &args.command {
+        if !filename.starts_with("kanzashi-movie/") {
+            println!("File path must start with kanzashi-movie (given filename: {})", filename);
+            std::process::exit(1);
+        }
+
+        let url = all_videos.iter().find(|v| movie_url_to_filename(v) == *filename);
+        if url.is_none() {
+            // Can't determine if it's a 3D video or not in this case
+            println!("No video metadata found for file {} in the given regions", filename);
+            std::process::exit(1);
+        }
+
+        all_videos = vec![url.unwrap()];
+    }
+
     if all_videos.is_empty() {
         println!("No video metadata found for the given regions");
         std::process::exit(1);
@@ -1410,7 +1433,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {},
     }
 
-    if matches!(args.command, SubCommand::ConvertMedia) {
+    if matches!(args.command, SubCommand::ConvertMedia(_)) {
         convert_moflex(&args);
     }
 
