@@ -432,6 +432,7 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint, locale
 
         if doc.contents.total == 0 {
             println!("No contents available");
+            full_list.push(resp);
             break;
         }
 
@@ -535,7 +536,14 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
         let mut file = File::create(format!("samurai/{}/{}/directory/paginated/{}%3Foffset%3D{}", locale.region, locale.language, directory_id, offset)).unwrap();
         write!(file, "{}", &resp)?;
 
-        let doc: DirectoryDocument = quick_xml::de::from_str(&resp).unwrap();
+        let doc: DirectoryDocument = quick_xml::de::from_str(&resp)?;
+
+        if doc.directory.contents.as_ref().map(|c| c.total).unwrap_or(0) == 0 {
+            println!("No contents available");
+            full_list.push(resp);
+            directory_info = Some(doc);
+            break;
+        }
 
         let contents = doc.directory.contents.as_ref().unwrap();
 
@@ -916,10 +924,13 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
     directory_ids.sort_unstable();
     for (index, directory_id) in directory_ids.iter().enumerate() {
         println!("Fetching metadata for directory {} ({} out of {})", directory_id, index + 1, directory_ids.len());
-        let directory: DirectoryDocument = handle_directory_content(&client, &directory_id, &locale).await?;
+        let directory: DirectoryDocument = match handle_directory_content(&client, &directory_id, &locale).await {
+            Ok(dir) => dir,
+            // NOTE: Wii U directory 1090749 is contained in the listing but returns an error page...
+            Err(err) => { println!("  Failed to parse metadata, skipping ({})", err); continue },
+        };
         let directory = directory.directory;
-        assert!(directory.contents.is_some());
-        for content in directory.contents.unwrap().content {
+        for content in directory.contents.into_iter().map(|c| c.content).flatten() {
             match content.title_or_movie {
                 NodeTitleOrMovie::Title(title) => if !title_ids.contains(&title.id) { title_ids.push(title.id) },
                 NodeTitleOrMovie::Movie(movie) => if !movie_ids.contains(&movie.id) { movie_ids.push(movie.id) },
@@ -1003,7 +1014,6 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             println!(" Directory {} ({} out of {})", &directory.display(), dir_index + 1, directory_set.len());
             let parsed_xml: DirectoryDocument = quick_xml::de::from_str(&String::from_utf8(fs::read(directory).unwrap()).unwrap()).unwrap();
             let directory = parsed_xml.directory;
-            assert!(directory.contents.is_some());
 
             println!("  Name: {}", &directory.name.replace("\n", " "));
 
