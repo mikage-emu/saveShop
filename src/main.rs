@@ -848,7 +848,14 @@ fn url_to_filename(url: &str) -> String {
 }
 
 fn movie_url_to_filename(url: &str) -> String {
-    format!("kanzashi-movie/{}", url.strip_prefix("https://kanzashi-movie-ctr.cdn.nintendo.net/m/").unwrap())
+    let url = url.strip_prefix("https://").unwrap();
+    let base_url = &url[0..url.find("/").unwrap() + 1];
+    let path = url.strip_prefix(base_url).unwrap();
+    match base_url {
+        "kanzashi-movie-ctr.cdn.nintendo.net/" => { format!("kanzashi-movie/{}", path.strip_prefix("m/").unwrap()) },
+        "kanzashi-movie-wup.cdn.nintendo.net/" => { format!("kanzashi-movie/{}", path.strip_prefix("m/").unwrap()) },
+        _ => panic!("Unrecognized resource URL \"{}\"", url)
+    }
 }
 
 async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Result<(), Box<dyn std::error::Error>> {
@@ -860,9 +867,8 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
     }
 
     let filename = movie_url_to_filename(&file.movie_url);
-    assert_eq!("moflex", std::path::Path::new(&filename).extension().unwrap());
 
-    // Skip if content size matches the moflex on disk
+    // Skip if content size matches the file on disk
     if let Ok(existing_file) = fs::metadata(&filename) {
         let response = client.get(&file.movie_url).send().await?;
         let content_length = response.content_length();
