@@ -897,24 +897,28 @@ async fn fetch_movie_file(client: &reqwest::Client, file: &NodeMovieFile) -> Res
 }
 
 async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, metadata_args: &FetchMetadataArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let constrained_fetch = args.directory_id.is_some() || args.title_id.is_some() || args.movie_id.is_some();
+
     // NOTE: We're fetching languages *again* here since language names are localized
-    for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::PublisherContacts, EndPoint::Platforms, EndPoint::SearchCategory, EndPoint::Languages, EndPoint::Rankings] {
-        println!("Fetching endpoint {}", endpoint);
-        let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
-        let filename = format!( "samurai/{}/{}/{}", locale.region, locale.language,
-                                if matches!(endpoint, EndPoint::PublisherContacts) { "publishers_/contacts".to_owned() } else { endpoint.to_string() });
-        let mut file = File::create(filename).unwrap();
-        write!(file, "{}", data)?;
+    if !constrained_fetch {
+        for endpoint in vec![EndPoint::News, EndPoint::Telops, EndPoint::Directories, EndPoint::Genres, EndPoint::Publishers, EndPoint::PublisherContacts, EndPoint::Platforms, EndPoint::SearchCategory, EndPoint::Languages, EndPoint::Rankings] {
+            println!("Fetching endpoint {}", endpoint);
+            let data = fetch_endpoint(&client, &format!("{}", endpoint), &locale).await?;
+            let filename = format!( "samurai/{}/{}/{}", locale.region, locale.language,
+                                    if matches!(endpoint, EndPoint::PublisherContacts) { "publishers_/contacts".to_owned() } else { endpoint.to_string() });
+            let mut file = File::create(filename).unwrap();
+            write!(file, "{}", data)?;
 
-        if matches!(endpoint, EndPoint::Rankings) {
-            let parsed_xml: NodeEshopRankings = match quick_xml::de::from_str(&data) {
-                Ok(parsed_xml) => parsed_xml,
-                // NOTE: 3DS eShop returns an error page for region CN
-                Err(err) => { println!("  Failed to parse rankings, skipping ({})", err); continue },
-            };
+            if matches!(endpoint, EndPoint::Rankings) {
+                let parsed_xml: NodeEshopRankings = match quick_xml::de::from_str(&data) {
+                    Ok(parsed_xml) => parsed_xml,
+                    // NOTE: 3DS eShop returns an error page for region CN
+                    Err(err) => { println!("  Failed to parse rankings, skipping ({})", err); continue },
+                };
 
-            for ranking in parsed_xml.rankings.ranking {
-                let _: RankingDocument = handle_ranking_content(&client, &ranking.id, &locale).await?;
+                for ranking in parsed_xml.rankings.ranking {
+                    let _: RankingDocument = handle_ranking_content(&client, &ranking.id, &locale).await?;
+                }
             }
         }
     }
