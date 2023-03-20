@@ -899,7 +899,12 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
         write!(file, "{}", data)?;
 
         if matches!(endpoint, EndPoint::Rankings) {
-            let parsed_xml: NodeEshopRankings = quick_xml::de::from_str(&data).unwrap();
+            let parsed_xml: NodeEshopRankings = match quick_xml::de::from_str(&data) {
+                Ok(parsed_xml) => parsed_xml,
+                // NOTE: 3DS eShop returns an error page for region CN
+                Err(err) => { println!("  Failed to parse rankings, skipping ({})", err); continue },
+            };
+
             for ranking in parsed_xml.rankings.ranking {
                 let _: RankingDocument = handle_ranking_content(&client, &ranking.id, &locale).await?;
             }
