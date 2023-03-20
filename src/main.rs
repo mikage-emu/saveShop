@@ -17,8 +17,12 @@ use serde::de::DeserializeOwned;
 use std::sync::Mutex;
 use once_cell::sync::OnceCell;
 
-const shop_id: i32 = 1; // 3DS
-// const shop_id: i32 = 2; // Wii U?
+// 1=3DS, 2=Wii U
+static SHOP_ID: OnceCell<i32> = OnceCell::new();
+
+fn get_shop_id() -> i32 {
+    return *SHOP_ID.get().unwrap();
+}
 
 // Used to avoid rate-limiting. Lower at your own risk.
 const FETCH_DELAY: time::Duration = time::Duration::from_secs(1);
@@ -108,7 +112,7 @@ async fn get_with_retry_generic<U, C, F, Output>(request: &reqwest::RequestBuild
 }
 
 async fn fetch_endpoint(client: &reqwest::Client, endpoint: &str, locale: &Locale) -> Result<String, reqwest::Error> {
-    let resp = get_with_retry(client, format!("{}/{}?shop_id={}&lang={}", samurai_baseurl(&locale.region), endpoint, shop_id, locale.language)).await?;
+    let resp = get_with_retry(client, format!("{}/{}?shop_id={}&lang={}", samurai_baseurl(&locale.region), endpoint, get_shop_id(), locale.language)).await?;
     Ok(resp)
 }
 
@@ -399,7 +403,7 @@ enum ContentType {
 
 async fn fetch_directory_list(client: &reqwest::Client, locale: &Locale) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let resp = get_with_retry(client, format!(  "{}/directories?shop_id={}&lang={}",
-                                    samurai_baseurl(&locale.region), shop_id, &locale.language)).await?;
+                                    samurai_baseurl(&locale.region), get_shop_id(), &locale.language)).await?;
     let doc: Result<NodeEshopDirectories, _> = quick_xml::de::from_str(&resp);
     match doc {
         Ok(doc) =>
@@ -423,7 +427,7 @@ async fn fetch_content_list(client: &reqwest::Client, endpoint: EndPoint, locale
 
     loop {
         let resp = get_with_retry(client, format!(  "{}/{}?offset={}&shop_id={}&lang={}",
-                                        samurai_baseurl(&locale.region), endpoint, offset, shop_id, &locale.language)).await?;
+                                        samurai_baseurl(&locale.region), endpoint, offset, get_shop_id(), &locale.language)).await?;
 
         let mut file = File::create(format!("samurai/{}/{}/paginated/contents%3Foffset%3D{}", locale.region, locale.language, offset)).unwrap();
         write!(file, "{}", &resp)?;
@@ -489,7 +493,7 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
         ContentType::Movie => "movie",
         ContentType::Demo => "demo",
     };
-    let url = format!(  "{}/{}/{}?shop_id={}&lang={}", samurai_baseurl(&locale.region), content_type_name, content_id, shop_id, &locale.language);
+    let url = format!(  "{}/{}/{}?shop_id={}&lang={}", samurai_baseurl(&locale.region), content_type_name, content_id, get_shop_id(), &locale.language);
     let resp = get_with_retry(client, url).await?;
 
     fs::create_dir_all(format!("samurai/{}/{}/{}", locale.region, locale.language, content_type_name)).unwrap();
@@ -501,7 +505,7 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
         if content_type == ContentType::Title ||
            content_type == ContentType::Demo {
             let ecinfo_resp = get_with_retry(client, format!(   "{}/title/{}/ec_info?shop_id={}&lang={}",
-                                                    ninja_baseurl(&locale.region), content_id, shop_id, &locale.language)).await?;
+                                                    ninja_baseurl(&locale.region), content_id, get_shop_id(), &locale.language)).await?;
             // Both titles and demos are exposed through the "title" endpoint
             fs::create_dir_all(format!("ninja/{}/{}/title/{}", locale.region, locale.language, content_id)).unwrap();
             let mut file = File::create(format!("ninja/{}/{}/title/{}/ec_info", locale.region, locale.language, content_id)).unwrap();
@@ -512,7 +516,7 @@ async fn handle_content<T: DeserializeOwned>(client: &reqwest::Client, content_i
         if content_type == ContentType::Title {
             // NOTE: Just returns "<eshop><online_prices/></eshop>" for arguments that are title ids but not purchasable (e.g. movies)
             let price_resp = get_with_retry(client, format!("{}/titles/online_prices?shop_id={}&lang={}&title[]={}",
-                                                    ninja_baseurl(&locale.region), shop_id, &locale.language, content_id)).await?;
+                                                    ninja_baseurl(&locale.region), get_shop_id(), &locale.language, content_id)).await?;
             fs::create_dir_all(format!("ninja/{}/{}/titles", locale.region, locale.language)).unwrap();
             let mut file = File::create(format!("ninja/{}/{}/titles/online_prices%3Ftitle%5B%5D%3D{}", locale.region, locale.language, content_id)).unwrap();
             write!(file, "{}", price_resp)?;
@@ -531,7 +535,7 @@ async fn handle_directory_content(client: &reqwest::Client, directory_id: &str, 
     let mut full_list = Vec::new();
     loop {
         let resp = get_with_retry(client, format!(  "{}/directory/{}?offset={}&shop_id={}&lang={}",
-                                        samurai_baseurl(&locale.region), directory_id, offset, shop_id, &locale.language)).await?;
+                                        samurai_baseurl(&locale.region), directory_id, offset, get_shop_id(), &locale.language)).await?;
 
         let mut file = File::create(format!("samurai/{}/{}/directory/paginated/{}%3Foffset%3D{}", locale.region, locale.language, directory_id, offset)).unwrap();
         write!(file, "{}", &resp)?;
@@ -610,7 +614,7 @@ async fn handle_ranking_content(client: &reqwest::Client, ranking_id: &str, loca
     let mut full_list = Vec::new();
     loop {
         let resp = get_with_retry(client, format!(  "{}/ranking/{}?offset={}&shop_id={}&lang={}",
-                                        samurai_baseurl(&locale.region), ranking_id, offset, shop_id, &locale.language)).await?;
+                                        samurai_baseurl(&locale.region), ranking_id, offset, get_shop_id(), &locale.language)).await?;
 
         let mut file = File::create(format!("samurai/{}/{}/ranking/paginated/{}%3Foffset%3D{}", locale.region, locale.language, ranking_id, offset)).unwrap();
         write!(file, "{}", &resp)?;
@@ -814,6 +818,10 @@ struct Args {
     /// Comma-delimited list of eShop regions to fetch from
     #[clap(long, possible_values = REGIONS, global = true, use_delimiter = true)]
     regions: Vec<String>,
+
+    /// Platform to fetch data for
+    #[clap(long, possible_values = ["3ds", "wiiu"], global = true, default_value_t = String::from("3ds"))]
+    platform: String,
 }
 
 impl fmt::Display for EndPoint {
@@ -959,7 +967,7 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
         if title.aoc_available {
             println!("  Fetching DLC list");
             let dlc_resp = get_with_retry(&client, format!("{}/title/{}/aocs?shop_id={}&lang={}",
-                                                    samurai_baseurl(&locale.region), title_id, shop_id, &locale.language)).await?;
+                                                    samurai_baseurl(&locale.region), title_id, get_shop_id(), &locale.language)).await?;
             fs::create_dir_all(format!("samurai/{}/{}/title/aocs", locale.region, locale.language)).unwrap();
             let mut file = File::create(format!("samurai/{}/{}/title/aocs/{}", locale.region, locale.language, title_id)).unwrap();
             write!(file, "{}", dlc_resp)?;
@@ -1313,6 +1321,8 @@ fn convert_moflex(args: &Args) {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
 
+    SHOP_ID.get_or_init(|| if args.platform == "wiiu" { 2 } else { 1 });
+
     if args.regions.is_empty() {
         use clap::CommandFactory;
         let mut cmd = Args::command();
@@ -1408,7 +1418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Fetch list of languages first
         let languages: Vec<_> = {
-            let data = get_with_retry(&client, format!("{}/{}?shop_id={}", samurai_baseurl(&region), EndPoint::Languages, shop_id)).await?;
+            let data = get_with_retry(&client, format!("{}/{}?shop_id={}", samurai_baseurl(&region), EndPoint::Languages, get_shop_id())).await?;
             let mut file = File::create(format!("samurai/{}/languages", region)).unwrap();
             write!(file, "{}", data)?;
 
