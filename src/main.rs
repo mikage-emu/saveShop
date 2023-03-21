@@ -944,8 +944,11 @@ async fn fetch_metadata(client: &reqwest::Client, locale: &Locale, args: &Args, 
                     Err(err) => { println!("  Failed to parse rankings, skipping ({})", err); continue },
                 };
 
-                for ranking in parsed_xml.rankings.ranking {
-                    let _: RankingDocument = handle_ranking_content(&client, &ranking.id, &locale).await?;
+                // The actual rankings aren't available for shop id 3 and 4
+                if get_shop_id() < 3 {
+                    for ranking in parsed_xml.rankings.ranking {
+                        let _: RankingDocument = handle_ranking_content(&client, &ranking.id, &locale).await?;
+                    }
                 }
             }
         }
