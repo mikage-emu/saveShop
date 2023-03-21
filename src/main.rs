@@ -880,6 +880,7 @@ fn url_to_filename(url: &str) -> String {
     match base_url {
         "kanzashi-ctr.cdn.nintendo.net/" => { format!("kanzashi/{}", path.strip_prefix("i/").unwrap()) },
         "kanzashi-wup.cdn.nintendo.net/" => { format!("kanzashi/{}", path.strip_prefix("i/").unwrap()) },
+        "img-eshop.cdn.nintendo.net/" => { format!("img-eshop/{}", path.strip_prefix("i/").unwrap()) },
         _ => panic!("Unrecognized resource URL \"{}\"", url)
     }
 }
@@ -1450,6 +1451,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let client = client_builder.build()?;
 
+    fs::create_dir_all(format!("img-eshop")).unwrap();
     fs::create_dir_all(format!("kanzashi")).unwrap();
     fs::create_dir_all(format!("kanzashi-movie")).unwrap();
 
