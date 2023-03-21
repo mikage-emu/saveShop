@@ -849,7 +849,7 @@ struct Args {
     regions: Vec<String>,
 
     /// Platform to fetch data for
-    #[clap(long, possible_values = ["3ds", "wiiu"], global = true, default_value_t = String::from("3ds"))]
+    #[clap(long, possible_values = ["3ds", "wiiu", "unknown3", "unknown4"], global = true, default_value_t = String::from("3ds"))]
     platform: String,
 }
 
@@ -1368,7 +1368,12 @@ fn convert_moflex(args: &Args) {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = Args::parse();
 
-    SHOP_ID.get_or_init(|| if args.platform == "wiiu" { 2 } else { 1 });
+    SHOP_ID.get_or_init(|| match args.platform.as_str() {
+        "3ds" => 1,
+        "wiiu" => 2,
+        "unknown3" => 3,
+        _ => 4
+    });
 
     if args.regions.is_empty() {
         use clap::CommandFactory;
