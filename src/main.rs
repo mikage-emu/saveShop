@@ -311,6 +311,34 @@ struct DirectoryDocument {
 }
 
 #[derive(Deserialize)]
+struct NodeNewsImage {
+    #[serde(rename = "@url")]
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct NodeNewsImages {
+    #[serde(default)]
+    image: Vec<NodeNewsImage>
+}
+
+#[derive(Deserialize)]
+struct NodeNewsEntry {
+    images: Option<NodeNewsImages>
+}
+
+#[derive(Deserialize)]
+struct NodeNews {
+    #[serde(default)]
+    news_entry: Vec<NodeNewsEntry>
+}
+
+#[derive(Deserialize)]
+struct NewsDocument {
+    news: NodeNews
+}
+
+#[derive(Deserialize)]
 struct NodeRanking {
     #[serde(rename = "@id")]
     id: String,
@@ -1008,6 +1036,15 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
 
     for subdir in dir_entries.filter(|f| f.file_type().unwrap().is_dir()) {
         println!("Gathering media resources for region {} / language {}", region, subdir.file_name().to_str().unwrap());
+
+        if let Ok(news_contents) = fs::read(subdir.path().join("news")) {
+            let parsed_xml: NewsDocument = quick_xml::de::from_str(&String::from_utf8(news_contents).unwrap()).unwrap();
+            for news_entry in parsed_xml.news.news_entry {
+                for image in news_entry.images.iter().map(|i| &i.image).flatten() {
+                    fetch_resource(&client, "news banner", &image.url).await?;
+                }
+            }
+        }
 
         let contained_files_iter = |path| {
             std::fs::read_dir(path)
