@@ -167,6 +167,7 @@ struct DemoTitle {
 
 #[derive(Deserialize)]
 struct DemoTitles {
+    #[serde(default)]
     demo_title: Vec<DemoTitle>
 }
 
