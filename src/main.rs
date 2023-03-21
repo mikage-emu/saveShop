@@ -1043,8 +1043,9 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
         println!("Gathering media resources for region {} / language {}", region, subdir.file_name().to_str().unwrap());
 
         if let Ok(news_contents) = fs::read(subdir.path().join("news")) {
-            let parsed_xml: NewsDocument = quick_xml::de::from_str(&String::from_utf8(news_contents).unwrap()).unwrap();
-            for news_entry in parsed_xml.news.news_entry {
+            // NOTE: Shop ids 3 and 4 may return error pages for this
+            let parsed_xml: Result<NewsDocument,_> = quick_xml::de::from_str(&String::from_utf8(news_contents).unwrap());
+            for news_entry in parsed_xml.iter().map(|n| &n.news.news_entry).flatten() {
                 for image in news_entry.images.iter().map(|i| &i.image).flatten() {
                     fetch_resource(&client, "news banner", &image.url).await?;
                 }
