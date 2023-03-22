@@ -848,7 +848,7 @@ struct Args {
     #[clap(long, possible_values = REGIONS, global = true, use_delimiter = true)]
     regions: Vec<String>,
 
-    /// Platform to fetch data for
+    /// Platform to fetch data for (use a dedicated folder for each!)
     #[clap(long, possible_values = ["3ds", "wiiu", "unknown3", "unknown4"], global = true, default_value_t = String::from("3ds"))]
     platform: String,
 }
