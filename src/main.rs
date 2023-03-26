@@ -201,6 +201,11 @@ impl Default for NodeScreenshots {
 }
 
 #[derive(Deserialize)]
+struct NodeTitlePlatform {
+    icon_url: Option<String>
+}
+
+#[derive(Deserialize)]
 struct NodeTitle {
     #[serde(rename = "@id")]
     id: String,
@@ -213,6 +218,8 @@ struct NodeTitle {
 
     #[serde(default)]
     thumbnails: NodeThumbnails,
+
+    platform: NodeTitlePlatform,
 
     rating_info: Option<NodeRatingInfo>,
 
@@ -1121,6 +1128,9 @@ async fn fetch_media_resources(client: &reqwest::Client, region: &str, args: &Ar
             }
             for rating_icon in icons_from_rating_info(title.rating_info) {
                 fetch_resource(&client, "rating icon", &rating_icon.url).await?;
+            }
+            if let Some(platform_icon) = title.platform.icon_url {
+                fetch_resource(&client, "platform icon", &platform_icon).await?;
             }
 
             for screenshot in title.screenshots.screenshot {
