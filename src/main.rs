@@ -88,23 +88,27 @@ async fn get_with_retry_generic<U, C, F, Output>(request: &reqwest::RequestBuild
             F: std::future::Future<Output = Result<Output, reqwest::Error>> {
     return loop {
         let err = match request.try_clone().unwrap().send().await {
-                Ok(response) => {
-                let headers = response.headers().clone();
-                match continuation(response).await {
-                    Ok(response_text) => {
-                        let resource_cache = RESOURCE_CACHE.get().unwrap();
-                        if matches!(resource_cache.lock().unwrap().get(&url.to_string()), None) {
-                            // Add dummy entry to resource cache to avoid logging the same request twice
-                            // (Note that logging itself happens in get_with_retry_generic)
-                            resource_cache.lock().unwrap().insert(url.to_string(), 1);
-                            log_headers(url, &headers);
-                        }
-                        break Ok(response_text)
-                    },
-                    Err(err) => err,
+            Ok(response) => {
+                if !response.status().is_success() {
+                    format!("Server returned HTTP status {}", response.status())
+                } else {
+                    let headers = response.headers().clone();
+                    match continuation(response).await {
+                        Ok(response_text) => {
+                            let resource_cache = RESOURCE_CACHE.get().unwrap();
+                            if matches!(resource_cache.lock().unwrap().get(&url.to_string()), None) {
+                                // Add dummy entry to resource cache to avoid logging the same request twice
+                                // (Note that logging itself happens in get_with_retry_generic)
+                                resource_cache.lock().unwrap().insert(url.to_string(), 1);
+                                log_headers(url, &headers);
+                            }
+                            break Ok(response_text)
+                        },
+                        Err(err) => err.to_string(),
+                    }
                 }
             }
-            Err(err) => err,
+            Err(err) => err.to_string(),
         };
         println!("  Got error {}, retrying in 10 seconds", err);
         thread::sleep(time::Duration::from_secs(10));
