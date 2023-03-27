@@ -89,8 +89,9 @@ async fn get_with_retry_generic<U, C, F, Output>(request: &reqwest::RequestBuild
     return loop {
         let err = match request.try_clone().unwrap().send().await {
             Ok(response) => {
-                if !response.status().is_success() {
-                    format!("Server returned HTTP status {}", response.status())
+                // Retry on error, unless the file just doesn't exist
+                if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
+                    format!("{}", response.status())
                 } else {
                     let headers = response.headers().clone();
                     match continuation(response).await {
